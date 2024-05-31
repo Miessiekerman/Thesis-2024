@@ -1,0 +1,2619 @@
+#* Script name: Thesis base case
+
+#* Implements a time-independent cSTM model that evaluates three 
+#* strategies:
+#*  
+#* - Strategy A: treatment A: Aflibercept
+#*   
+#* - Strategy B: treatment B: Bevacizumab
+#*  
+#* - Strategy C: treatment C: PDS
+#*   
+#*    
+#******************************************************************************#
+# Initial setup ---- 
+rm(list = ls())    # remove any variables in R's memory 
+
+## Install required packages ----
+# install.packages("dplyr")      # to manipulate data
+# install.packages("tidyr")      # to manipulate data
+# install.packages("reshape2")   # to manipulate data
+# install.packages("ggplot2")    # to visualize data
+# install.packages("ggrepel")    # to visualize data
+# install.packages("ellipse")    # to visualize data
+# install.packages("scales")     # for dollar signs and commas
+# install.packages("dampack")    # for CEA and calculate ICERs
+# install.packages("devtools")   # to install packages from GitHub
+# devtools::install_github("DARTH-git/darthtools") # to install darthtools from GitHub using devtools
+# install.packages("doParallel") # to handle parallel processing
+# install.packages("openxlsx")
+
+## Load packages ----
+library(dplyr)
+library(tidyr)
+library(reshape2)   # For melting data
+library(ggplot2)    # For plotting
+library(ggrepel)    # For plotting
+library(ellipse)    # For plotting
+library(gridExtra)  # For combining plots
+library(scales)     # For dollar signs and commas
+library(dampack)  # Uncomment to use CEA and PSA visualization functionality from dampack instead of the functions included in this repository
+library(openxlsx)
+# library(darthtools) # Uncomment to use WCC, parameter transformation, and matrix checks from darthtools instead of the functions included in this repository
+# library(doParallel) # For running PSA in parallel
+# probablity to rate function
+prob_to_rate <- function(p, t = 1){
+  if ((sum(p > 1) > 0) | (sum(p < 0) > 0)){
+    stop("probability not between 0 and 1")
+  }
+  r = -(1/t)*log(1 - p)
+  return(r)
+}
+
+## Load supplementary functions ----
+source("/Users/miessiekerman/Library/Mobile Documents/com~apple~CloudDocs/Documents/EU-HEM Thesis/R Studio/Functions.R")
+
+# Model input ----
+## General setup ----
+cycle_length <- 1       # cycle length equal to one year (use 1/12 for monthly)
+n_age_init <- 75        # age at baseline
+n_age_max  <- 107       # maximum age of follow up, maximum age in life table Norway is 106. So at age 107, everyone is dead. 
+n_cycles <- ((n_age_max) - n_age_init)/cycle_length # time horizon, number of cycles
+v_age_names <- paste(rep(n_age_init:(n_age_max-1), each = 1/cycle_length), 
+                     1:(1/cycle_length), 
+                     sep = ".")
+
+v_names_states <- c("BCVA1", # the 7 health states of the model:
+                    "BCVA2", 
+                    "BCVA3",
+                    "BCVA4",
+                    "BCVA5",
+                    "BCVA6",
+                    "D"  ) 
+                                          
+n_states <- length(v_names_states)     # number of health states 
+
+# Creating a vector for ages at each cycle
+ages <- seq(n_age_init, n_age_max, by = cycle_length)
+
+### Discounting factors ----
+d_c <- 0.04 # annual discount rate for costs 
+d_e <- 0.04 # annual discount rate for QALYs
+
+### Type of analysis ----
+treatment_type <- "TREX"  # "TREX" or "monthly theoretical" or "monthly RWD" depending on your comparison
+
+### Number of injections per year ---- 8.8 7.3 4.4  .. 8.9 9.2 5.5
+if (treatment_type == "monthly theoretical") {
+  n_injections_strA_y1 <- 365.25/28 # number of injections for strategy A per year
+  n_injections_strA_y2 <- 365.25/28 # number of injections for strategy A per year
+  n_injections_strA_y3 <- 365.25/28 # number of injections for strategy A per year
+  n_injections_strB_y1 <- 365.25/28 # number of injections for strategy B per year
+  n_injections_strB_y2 <- 365.25/28 # number of injections for strategy B per year
+  n_injections_strB_y3 <- 365.25/28 # number of injections for strategy B per year
+} else if (treatment_type == "monthly RWD") {
+  n_injections_strA_y1 <- 11.90 # number of injections for strategy A per year
+  n_injections_strA_y2 <- 11.38 # number of injections for strategy A per year
+  n_injections_strA_y3 <- 10.92 # number of injections for strategy A per year
+  n_injections_strB_y1 <- 11.65 # number of injections for strategy B per year
+  n_injections_strB_y2 <- 11.01 # number of injections for strategy B per year
+  n_injections_strB_y3 <- 10.92 # number of injections for strategy B per year
+} else if (treatment_type == "TREX") {
+  n_injections_strA_y1 <- 8.81 # number of injections for strategy A per year
+  n_injections_strA_y2 <- 7.28 # number of injections for strategy A per year
+  n_injections_strA_y3 <- 4.38 # number of injections for strategy A per year
+  n_injections_strB_y1 <- 8.90 # number of injections for strategy B per year
+  n_injections_strB_y2 <- 9.2 # number of injections for strategy B per year
+  n_injections_strB_y3 <- 5.52 # number of injections for strategy B per year
+}
+n_injections_strC_y1 <- 1   # number of injections for strategy C in year 1
+n_injections_strC_y2 <- 2   # number of injections for strategy C in year 2+
+
+### Strategies ----
+if (treatment_type == "monthly theoretical") {
+  v_names_str <- c("Aflibercept monthly theoretical (A)",      # store the strategy names. Start with base case analysis in perfect world.
+                   "Bevacizumab monthly theoretical (B)", 
+                   "PDS (C)")
+} else if (treatment_type == "monthly RWD") {
+  v_names_str <- c("Aflibercept monthly RWD (A)",      # store the strategy names. Start with base case analysis in perfect world.
+                   "Bevacizumab monthly RWD (B)", 
+                   "PDS (C)")
+} else if (treatment_type == "TREX") {
+  v_names_str <- c("Aflibercept TREX (A)",      # store the strategy names. Start with base case analysis in perfect world.
+                   "Bevacizumab TREX (B)", 
+                   "PDS (C)")
+}
+
+n_str       <- length(v_names_str)        # number of strategies
+
+### Scenario analyses
+rr_AEprobabilities_TREX <- 1 # Scenario: relative risk (0.31) for AE probabilities of TREX vs IV
+perc_patients_IVDisu <- 0.5
+
+### Discount weight for costs and effects 
+v_dwc   <- 1 / ((1 + (d_e * cycle_length)) ^ (0:n_cycles))
+v_dwe   <- 1 / ((1 + (d_c * cycle_length)) ^ (0:n_cycles))
+
+# Within-cycle correction (WCC) - method  options Simpson's 1/3 rule, "half-cycle" or "none" 
+# implement real function instead of using the letternig "gen_wcc from darth"
+#gen_wcc functions is from DARTH
+
+gen_wcc <- function(n_cycles, method = c("Simpson1/3", "half-cycle", "none")){
+  if(n_cycles <= 0){
+    stop("Number of cycles should be positive")
+  }
+  
+  method <- match.arg(method)
+  
+  n_cycles <- as.integer(n_cycles)
+  
+  if (method == "Simpson1/3"){
+    ## Vector with cycles
+    v_cycles <- seq(1, n_cycles + 1)
+    ## Generate 2/3 and 4/3 multipliers for even and odd entries, respectively
+    v_wcc <- ((v_cycles %% 2)==0)*(2/3) + ((v_cycles %% 2)!=0)*(4/3)
+    ## Substitute 1/3 in first and last entries
+    v_wcc[1] <- v_wcc[n_cycles + 1] <- 1/3
+  }
+  if (method == "half-cycle"){
+    ## Initialize within-cycle correction vector
+    v_wcc <- rep(1, n_cycles + 1)
+    ## Within-cycle correction weights for first and last cycle
+    v_wcc[1] <- v_wcc[n_cycles + 1] <- 0.5
+  }
+  if (method == "none"){
+    ## Initialize within-cycle correction vector
+    v_wcc <- rep(1, n_cycles + 1)
+  }
+  return(v_wcc)
+}
+
+v_wcc    <- gen_wcc(n_cycles = n_cycles, method = "half-cycle") # vector of wcc
+
+### Transition rates (annual), and hazard ratios (HRs) ----
+r_BCVA12dis  <- 0     # constant annual rate 
+r_BCVA13dis  <- 0     # constant annual rate 
+r_BCVA14dis  <- 0     # constant annual rate 
+r_BCVA15dis  <- 0     # constant annual rate 
+r_BCVA16dis  <- 0     # constant annual rate 
+r_BCVA21dis  <- 0     # constant annual rate 
+r_BCVA23dis  <- 0     # constant annual rate 
+r_BCVA24dis  <- 0     # constant annual rate 
+r_BCVA25dis  <- 0     # constant annual rate 
+r_BCVA26dis  <- 0     # constant annual rate 
+r_BCVA31dis  <- 0     # constant annual rate 
+r_BCVA32dis  <- 0     # constant annual rate 
+r_BCVA34dis  <- 0     # constant annual rate 
+r_BCVA35dis  <- 0     # constant annual rate 
+r_BCVA36dis  <- 0     # constant annual rate 
+r_BCVA41dis  <- 0     # constant annual rate 
+r_BCVA42dis  <- 0     # constant annual rate 
+r_BCVA43dis  <- 0     # constant annual rate 
+r_BCVA45dis  <- 0     # constant annual rate 
+r_BCVA46dis  <- 0     # constant annual rate
+r_BCVA51dis  <- 0     # constant annual rate 
+r_BCVA52dis  <- 0     # constant annual rate 
+r_BCVA53dis  <- 0     # constant annual rate 
+r_BCVA54dis  <- 0     # constant annual rate 
+r_BCVA56dis  <- 0     # constant annual rate 
+r_BCVA61dis  <- 0     # constant annual rate 
+r_BCVA62dis  <- 0     # constant annual rate 
+r_BCVA63dis  <- 0     # constant annual rate 
+r_BCVA64dis  <- 0     # constant annual rate 
+r_BCVA65dis  <- 0     # constant annual rate 
+
+hr_BCVA1D  <- 1.13    # hazard ratio of death for stage 1 versus stage 1 
+hr_BCVA2D  <- 1.13    # hazard ratio of death for stage 2 versus stage 1 
+hr_BCVA3D  <- 1.13    # hazard ratio of death for stage 3 versus stage 1 
+hr_BCVA4D  <- 1.13    # hazard ratio of death for VA <55 in either eye
+hr_BCVA5D  <- 1.13    # hazard ratio of death for VA <55 in either eye
+hr_BCVA6D  <- 1.28    # hazard ratio of death for VA <55 in either eye
+
+## Age-dependent mortality rates ----
+lt_norway_2022 <- read.csv("/Users/miessiekerman/Library/Mobile Documents/com~apple~CloudDocs/Documents/EU-HEM Thesis/R Studio/Data files/MortalityNorway2022.csv")
+#* Extract age-specific all-cause mortality for ages in model time horizon. Norwegian mortality table consists of probabilities. Convert the proabilities into rates to be able to include mortality hazard rates due to blindness. 
+v_p_mort_by_age <- lt_norway_2022 %>% 
+  dplyr::filter(Age >= n_age_init & Age <= n_age_max) %>%
+  dplyr::select(Total) %>%
+  as.matrix()
+
+v_r_mort_by_age <- prob_to_rate(v_p_mort_by_age, t = cycle_length)
+
+
+### State rewards ----
+#### Costs ----
+# Costs PDS
+n_PDS_surgery <- 1
+c_PDS_surgery <- 15517.656
+c_PDS_drug <- 25242.42
+c_PDS_refill_procedure <- 3552.864
+n_PDS_monitoring_Y1 <- 3
+n_PDS_monitoring_Y2 <- 0
+c_monitoring_procedure <- 1515.192
+c_PDS_treatment_Y1 <- n_PDS_surgery * (c_PDS_surgery + c_PDS_drug) + n_injections_strC_y1 * (c_PDS_refill_procedure + c_PDS_drug) + n_PDS_monitoring_Y1 * c_monitoring_procedure
+c_PDS_treatment_Y2 <- n_injections_strC_y2 * (c_PDS_refill_procedure + c_PDS_drug) + n_PDS_monitoring_Y2 * c_monitoring_procedure
+
+# Costs aflibercept/bevacizumab
+c_IVinjection_procedure <- 3552.864
+c_production_syringe <- 400
+
+c_afli_drugpervial <- 8139.92
+n_afli_injectionspervial <- 2.5
+c_afli_drug <- (c_afli_drugpervial/n_afli_injectionspervial) + c_production_syringe
+c_afli_treatment <- c_afli_drug + c_IVinjection_procedure
+
+c_beva_drugpervial <- 2879.04
+n_beva_injectionspervial <- 20
+c_beva_drug <- (c_beva_drugpervial/n_beva_injectionspervial) + c_production_syringe
+c_beva_treatment <- c_beva_drug + c_IVinjection_procedure
+
+# Costs transport/leisure time
+c_transporthospital_pertrip <- 794
+n_transport_pervisit <- 2
+n_hours_lostleisuretime_injectionmonitoring <- 5
+n_hours_lostleisuretime_surgery <- 7
+c_lostleisuretime_perhour <- 310.4264
+p_peopleneedingaccompany <- 0.38
+
+c_transportleisure_pervisit_injectionmonitoring <- (n_transport_pervisit * c_transporthospital_pertrip) + (n_hours_lostleisuretime_injectionmonitoring * c_lostleisuretime_perhour) 
+c_transportleisure_pervisit_accompany_injectionmonitoring <- p_peopleneedingaccompany * ((n_transport_pervisit * c_transporthospital_pertrip) + (n_hours_lostleisuretime_injectionmonitoring * c_lostleisuretime_perhour))
+c_transportleisure_totalpervisit_injectionmonitoring <- c_transportleisure_pervisit_injectionmonitoring + c_transportleisure_pervisit_accompany_injectionmonitoring
+m_cost_transportleisure_injectionmonitoring <- matrix(c_transportleisure_totalpervisit_injectionmonitoring, nrow = n_cycles + 1, ncol = n_states) # Matrix of costs transport and leisure per monitoring/injection visit
+
+c_transportleisure_pervisit_surgery <- (n_transport_pervisit * c_transporthospital_pertrip) + (n_hours_lostleisuretime_injectionmonitoring * c_lostleisuretime_perhour) 
+c_transportleisure_pervisit_accompany_surgery <- p_peopleneedingaccompany * ((n_transport_pervisit * c_transporthospital_pertrip) + (n_hours_lostleisuretime_surgery * c_lostleisuretime_perhour))
+c_transportleisure_totalpervisit_surgery <- c_transportleisure_pervisit_surgery + c_transportleisure_pervisit_accompany_surgery
+m_cost_transportleisure_surgery <- matrix(c_transportleisure_totalpervisit_surgery, nrow = n_cycles + 1, ncol = n_states) # Matrix of costs transport and leisure per visit surgery
+
+# Costs adverse events 
+c_ophthalmologistvisit <- 1515.192
+n_ophthalmologistvisit_conjunctivalbleb <- 2
+n_treatment_vitreoushemorrhage <- 1
+c_treatment_vitreoushemorrhage <- 45508.008
+n_ophthalmologistvisit_vitreoushemorrhage <- 5
+n_treatment_cataract <- 1
+c_treatment_cataract <- 12591.768
+n_ophthalmologistvisit_cataract <- 2
+n_ophthalmologistvisit_conjunctivalerosion <- 2
+n_treatment_conjunctivalretraction <- 1
+c_treatment_conjunctivalretraction <- 15517.656
+n_ophthalmologistvisit_conjunctivalretraction <- 2
+n_endophthalmitis_parsplanavitrectomy <- 1
+c_endophthalmitis_parsplanavitrectomy <- 67765.656
+c_endophthalmitis_vancomycin <- 87.99
+c_endophthalmitis_ceftazidim <- 29.75
+c_endophthalmitis_antibiotics <- 3552.864
+n_ophthalmologistvisit_endophthalmitis <- 5
+n_treatment_retinaldetachment <- 1
+c_treatment_retinaldetachment <- 27952.68
+n_ophthalmologistvisit_retinaldetachment <- 2
+n_treatment_hyphema <- 1
+c_treatment_hyphema <- 15517.656
+n_ophthalmologistvisit_hyphema <- 2
+n_treatment_implantdislocation <- 1
+c_treatment_implantdislocation <- 15517.656
+n_ophthalmologistvisit_implantdislocation <- 2
+n_treatment_retinaltear <- 1
+c_treatment_retinaltear <- 27952.68
+n_ophthalmologistvisit_retinaltear <- 2
+
+# Costs AE per event
+c_conjunctivalbleb_perevent <- n_ophthalmologistvisit_conjunctivalbleb * c_ophthalmologistvisit
+c_vitreoushemorrhage_perevent <- n_treatment_vitreoushemorrhage * c_treatment_vitreoushemorrhage + n_ophthalmologistvisit_vitreoushemorrhage * c_ophthalmologistvisit
+c_cataract_perevent <- n_treatment_cataract * c_treatment_cataract + n_ophthalmologistvisit_cataract * c_ophthalmologistvisit
+c_conjunctivalerosion_perevent <- n_ophthalmologistvisit_conjunctivalerosion * c_ophthalmologistvisit
+c_conjunctivalretraction_perevent <- n_treatment_conjunctivalretraction * c_treatment_conjunctivalretraction + n_ophthalmologistvisit_conjunctivalretraction *c_ophthalmologistvisit
+c_endophthalmitis_perevent <- n_endophthalmitis_parsplanavitrectomy * c_endophthalmitis_parsplanavitrectomy + c_endophthalmitis_vancomycin + c_endophthalmitis_ceftazidim + c_endophthalmitis_antibiotics + n_ophthalmologistvisit_endophthalmitis * c_ophthalmologistvisit
+c_retinaldetachment_perevent <- n_treatment_retinaldetachment * c_treatment_retinaldetachment + n_ophthalmologistvisit_retinaldetachment * c_ophthalmologistvisit
+c_hyphema_perevent <- n_treatment_hyphema * c_treatment_hyphema + n_ophthalmologistvisit_hyphema * c_ophthalmologistvisit
+c_implantdislocation_perevent <- n_treatment_implantdislocation * c_treatment_implantdislocation + n_ophthalmologistvisit_implantdislocation * c_ophthalmologistvisit
+c_retinaltear_perevent <- n_treatment_retinaltear * c_treatment_retinaltear + n_ophthalmologistvisit_retinaltear * c_ophthalmologistvisit
+
+# Initialize AE costs per event matrices
+m_c_conjunctivalbleb_perevent <- matrix(c_conjunctivalbleb_perevent, nrow = n_cycles + 1, ncol = n_states)
+m_c_vitreoushemorrhage_perevent <- matrix(c_vitreoushemorrhage_perevent, nrow = n_cycles + 1, ncol = n_states)
+m_c_cataract_perevent <- matrix(c_cataract_perevent, nrow = n_cycles + 1, ncol = n_states)
+m_c_conjunctivalerosion_perevent <- matrix(c_conjunctivalerosion_perevent, nrow = n_cycles + 1, ncol = n_states)
+m_c_conjunctivalretraction_perevent <- matrix(c_conjunctivalretraction_perevent, nrow = n_cycles + 1, ncol = n_states)
+m_c_endophthalmitis_perevent <- matrix(c_endophthalmitis_perevent, nrow = n_cycles + 1, ncol = n_states)
+m_c_retinaldetachment_perevent <- matrix(c_retinaldetachment_perevent, nrow = n_cycles + 1, ncol = n_states)
+m_c_hyphema_perevent <- matrix(c_hyphema_perevent, nrow = n_cycles + 1, ncol = n_states)
+m_c_implantdislocation_perevent <- matrix(c_implantdislocation_perevent, nrow = n_cycles + 1, ncol = n_states)
+m_c_retinaltear_perevent <- matrix(c_retinaltear_perevent, nrow = n_cycles + 1, ncol = n_states)
+
+
+# Costs per health state
+c_BCVA1    <- 0                  # annual cost of being in state 1
+c_BCVA2    <- 0                  # annual cost of being in state 2
+c_BCVA3    <- 0                  # annual cost of being in state 3
+c_BCVA4    <- 0                  # annual cost of being in state 4
+c_BCVA5    <- 0                  # annual cost of being in state 5
+c_BCVA6    <- 95753.40           # annual cost of being in state 6
+c_D        <- 0                  # annual cost of being dead
+
+
+
+#### Utilities ---- Utility values based on the BSE calculated by NICE based on Brown et al. (2000), without age-dependency
+utilitytable_agedependent <- read.csv("/Users/miessiekerman/Library/Mobile Documents/com~apple~CloudDocs/Documents/EU-HEM Thesis/R Studio/Data files/Age dependent (dis)utility values.csv")
+#* Extract age-specific utilities for ages in model time horizon. 
+v_u_utility_BCVA1 <- utilitytable_agedependent %>% 
+  dplyr::filter(Age >= n_age_init & Age <= n_age_max) %>%
+  dplyr::select("BCVA.1.with.age.adjustment") %>%
+  as.matrix()
+  # Create a row of zeros with the same number of columns as v_u_utility_BCVA1 to ensure that utility and cohort trace can be multiplied. In the last row, utilities can be set to 0, because everyone is dead.
+  zero_row <- matrix(0, ncol = ncol(v_u_utility_BCVA1))
+  # Concatenate the row of zeros with v_u_utility_BCVA1
+  v_u_utility_BCVA1 <- rbind(v_u_utility_BCVA1,zero_row)
+v_u_utility_BCVA2 <- utilitytable_agedependent %>% 
+  dplyr::filter(Age >= n_age_init & Age <= n_age_max) %>%
+  dplyr::select("BCVA.2.with.age.adjustment") %>%
+  as.matrix()
+  zero_row <- matrix(0, ncol = ncol(v_u_utility_BCVA2))
+  v_u_utility_BCVA2 <- rbind(v_u_utility_BCVA2, zero_row)
+v_u_utility_BCVA3 <- utilitytable_agedependent %>% 
+  dplyr::filter(Age >= n_age_init & Age <= n_age_max) %>%
+  dplyr::select("BCVA.3.with.age.adjustment") %>%
+  as.matrix()
+  zero_row <- matrix(0, ncol = ncol(v_u_utility_BCVA3))
+  v_u_utility_BCVA3 <- rbind(v_u_utility_BCVA3, zero_row)
+v_u_utility_BCVA4 <- utilitytable_agedependent %>% 
+  dplyr::filter(Age >= n_age_init & Age <= n_age_max) %>%
+  dplyr::select("BCVA.4.with.age.adjustment") %>%
+  as.matrix()
+  zero_row <- matrix(0, ncol = ncol(v_u_utility_BCVA4))
+  v_u_utility_BCVA4 <- rbind(v_u_utility_BCVA4, zero_row)
+v_u_utility_BCVA5 <- utilitytable_agedependent %>% 
+  dplyr::filter(Age >= n_age_init & Age <= n_age_max) %>%
+  dplyr::select("BCVA.5.with.age.adjustment") %>%
+  as.matrix()
+  zero_row <- matrix(0, ncol = ncol(v_u_utility_BCVA5))
+  v_u_utility_BCVA5 <- rbind(v_u_utility_BCVA5, zero_row)
+v_u_utility_BCVA6 <- utilitytable_agedependent %>% 
+  dplyr::filter(Age >= n_age_init & Age <= n_age_max) %>%
+  dplyr::select("BCVA.6.with.age.adjustment") %>%
+  as.matrix()
+  zero_row <- matrix(0, ncol = ncol(v_u_utility_BCVA6))
+  v_u_utility_BCVA6 <- rbind(v_u_utility_BCVA6, zero_row)
+
+# #### Utilities ---- Utility values based on the BSE calculated by NICE based on Brown et al. (2000), age-dependent
+u_BCVA1     <- v_u_utility_BCVA1  # annual utility of being in state 1
+u_BCVA2     <- v_u_utility_BCVA2  # annual utility of being in state 2
+u_BCVA3     <- v_u_utility_BCVA3  # annual utility of being in state 3
+u_BCVA4     <- v_u_utility_BCVA4  # annual utility of being in state 4
+u_BCVA5     <- v_u_utility_BCVA5  # annual utility of being in state 5
+u_BCVA6     <- v_u_utility_BCVA6  # annual utility of being in state 6
+u_D         <- 0                  # annual utility of being dead
+
+#### PDS insertion disutilities (disutilities per injection) ----
+disu_PDS_insertion_year <- -0.13 # disutility of PDS insertion per year (only in year 1)
+dur_PDS_insertion <- 2/52   # event duration PDS insertion in years
+disu_PDS_insertion <- disu_PDS_insertion_year*dur_PDS_insertion
+
+#### Injection disutilities (disutilities per injection) ---- 
+IVDisutilitytable_agedependent <- read.csv("/Users/miessiekerman/Library/Mobile Documents/com~apple~CloudDocs/Documents/EU-HEM Thesis/R Studio/Data files/Age dependent (dis)utility values.csv") # This file contains the disutitilies per year for IV injections. Calculated as the maximum utility value/365 (for one day).
+#* Extract age-specific utilities for ages in model time horizon. 
+v_u_IVDisutility_BCVA1 <- IVDisutilitytable_agedependent %>% 
+  dplyr::filter(Age >= n_age_init & Age <= n_age_max) %>%
+  dplyr::select("Disutility.BCVA1.per.injection") %>%
+  as.matrix()
+  # Create a row of zeros with the same number of columns as v_u_utility_BCVA1 to ensure that utility and cohort trace can be multiplied. In the last cycle, there is no disutility because everyone is dead and there is no treatment anymore.
+  zero_row <- matrix(0, ncol = ncol(v_u_IVDisutility_BCVA1))
+  # Concatenate the row of zeros with v_u_IVDisutility_BCVA1
+  v_u_IVDisutility_BCVA1 <- rbind(v_u_IVDisutility_BCVA1, zero_row)
+v_u_IVDisutility_BCVA2 <- IVDisutilitytable_agedependent %>% 
+  dplyr::filter(Age >= n_age_init & Age <= n_age_max) %>%
+  dplyr::select("Disutility.BCVA2.per.injection") %>%
+  as.matrix()
+  zero_row <- matrix(0, ncol = ncol(v_u_IVDisutility_BCVA2))
+  v_u_IVDisutility_BCVA2 <- rbind(v_u_IVDisutility_BCVA2, zero_row)
+v_u_IVDisutility_BCVA3 <- IVDisutilitytable_agedependent %>% 
+  dplyr::filter(Age >= n_age_init & Age <= n_age_max) %>%
+  dplyr::select("Disutility.BCVA3.per.injection") %>%
+  as.matrix()
+  zero_row <- matrix(0, ncol = ncol(v_u_IVDisutility_BCVA3))
+  v_u_IVDisutility_BCVA3 <- rbind(v_u_IVDisutility_BCVA3, zero_row)
+v_u_IVDisutility_BCVA4 <- IVDisutilitytable_agedependent %>% 
+  dplyr::filter(Age >= n_age_init & Age <= n_age_max) %>%
+  dplyr::select("Disutility.BCVA4.per.injection") %>%
+  as.matrix()
+  zero_row <- matrix(0, ncol = ncol(v_u_IVDisutility_BCVA4))
+  v_u_IVDisutility_BCVA4 <- rbind(v_u_IVDisutility_BCVA4, zero_row)
+v_u_IVDisutility_BCVA5 <- IVDisutilitytable_agedependent %>% 
+  dplyr::filter(Age >= n_age_init & Age <= n_age_max) %>%
+  dplyr::select("Disutility.BCVA5.per.injection") %>%
+  as.matrix()
+  zero_row <- matrix(0, ncol = ncol(v_u_IVDisutility_BCVA5))
+  v_u_IVDisutility_BCVA5 <- rbind(v_u_IVDisutility_BCVA5, zero_row)
+v_u_IVDisutility_BCVA6 <- IVDisutilitytable_agedependent %>% 
+  dplyr::filter(Age >= n_age_init & Age <= n_age_max) %>%
+  dplyr::select("Disutility.BCVA6.per.injection") %>%
+  as.matrix()
+  zero_row <- matrix(0, ncol = ncol(v_u_IVDisutility_BCVA6))
+  v_u_IVDisutility_BCVA6 <- rbind(v_u_IVDisutility_BCVA6, zero_row)
+
+IVDisu_BCVA1     <- v_u_IVDisutility_BCVA1  # disutility per injection in state 1
+IVDisu_BCVA2     <- v_u_IVDisutility_BCVA2  # disutility per injection in state 2
+IVDisu_BCVA3     <- v_u_IVDisutility_BCVA3  # disutility per injection in state 3
+IVDisu_BCVA4     <- v_u_IVDisutility_BCVA4  # disutility per injection in state 4
+IVDisu_BCVA5     <- v_u_IVDisutility_BCVA5  # disutility per injection in state 5
+IVDisu_BCVA6     <- v_u_IVDisutility_BCVA6  # disutility per injection in state 6
+IVDisu_D         <- 0                       # disutility per injection when dead
+
+#### Adverse events disutilities ----
+disu_conjunctivalbleb_year       <- -0.13  # Annual disutility conjunctival bleb
+disu_vitreoushemorrhage_year     <- -0.15  # Annual disutility vitreous hemorrhage
+disu_cataract_year               <- -0.142 # Annual disutility cataract
+disu_conjunctivalerosion_year    <- -0.13  # Annual disutility conjunctival erosion
+disu_conjunctivalretraction_year <- -0.13  # Annual disutility conjunctival retraction
+disu_endophthalmitis_year        <- -0.3   # Annual disutility endophthalmitis
+disu_retinaldetachment_year      <- -0.27  # Annual disutility (Rhegmatogenous) retinal detachment
+disu_hyphema_year                <- -0.15  # Annual disutility hyphema
+disu_implantdislocation_year     <- -0.13  # Annual disutility implant dislocation
+disu_retinaltear_year            <-  0     # Annual disutility retinal tear
+
+#### Adverse events durations ----
+dur_conjunctivalbleb       <- 2/52                       # Duration conjunctival bleb
+dur_vitreoushemorrhage     <- 26/52                      # Duration vitreous hemorrhage
+dur_cataract               <- 4/52                       # Duration cataract
+dur_conjunctivalerosion    <- 1/52                       # Duration conjunctival erosion
+dur_conjunctivalretraction <- 2/52                       # Duration conjunctival retraction
+dur_endophthalmitis        <- 0.2*(52/52) + 0.8*(6/52)   # Duration endophthalmitis
+dur_retinaldetachment      <- 3/52                       # Duration (Rhegmatogenous) retinal detachment
+dur_hyphema                <- 4/52                       # Duration hyphema
+dur_implantdislocation     <- 2/52                       # Duration implant dislocation
+dur_retinaltear            <- 0                          # Duration retinal tear
+
+#### Adverse events disutility per event ----
+disu_conjunctivalbleb       <- disu_conjunctivalbleb_year * dur_conjunctivalbleb              # Disutility conjunctival bleb per event
+disu_vitreoushemorrhage     <- disu_vitreoushemorrhage_year * dur_vitreoushemorrhage          # Disutility vitreous hemorrhage per event
+disu_cataract               <- disu_cataract_year * dur_cataract                              # Disutility cataract per event
+disu_conjunctivalerosion    <- disu_conjunctivalerosion_year * dur_conjunctivalerosion        # Disutility conjunctival erosion per event
+disu_conjunctivalretraction <- disu_conjunctivalretraction_year * dur_conjunctivalretraction  # Disutility conjunctival retraction per event
+disu_endophthalmitis        <- disu_endophthalmitis_year * dur_endophthalmitis                # Disutility endophthalmitis per event
+disu_retinaldetachment      <- disu_retinaldetachment_year * dur_retinaldetachment            # Disutility (Rhegmatogenous) retinal detachment per event
+disu_hyphema                <- disu_hyphema_year * dur_hyphema                                # Disutility hyphema per event
+disu_implantdislocation     <- disu_implantdislocation_year * dur_implantdislocation          # Disutility implant dislocation per event
+disu_retinaltear            <- disu_retinaltear_year * dur_retinaltear                        # Disutility retinal tear per event
+
+# Initialize AE disutility per event matrices
+m_disu_conjunctivalbleb       <- matrix(disu_conjunctivalbleb, nrow = n_cycles + 1, ncol = n_states)
+m_disu_vitreoushemorrhage     <- matrix(disu_vitreoushemorrhage, nrow = n_cycles + 1, ncol = n_states)
+m_disu_cataract               <- matrix(disu_cataract, nrow = n_cycles + 1, ncol = n_states)
+m_disu_conjunctivalerosion    <- matrix(disu_conjunctivalerosion, nrow = n_cycles + 1, ncol = n_states)
+m_disu_conjunctivalretraction <- matrix(disu_conjunctivalretraction, nrow = n_cycles + 1, ncol = n_states)
+m_disu_endophthalmitis        <- matrix(disu_endophthalmitis, nrow = n_cycles + 1, ncol = n_states)
+m_disu_retinaldetachment      <- matrix(disu_retinaldetachment, nrow = n_cycles + 1, ncol = n_states)
+m_disu_hyphema                <- matrix(disu_hyphema, nrow = n_cycles + 1, ncol = n_states)
+m_disu_implantdislocation     <- matrix(disu_implantdislocation, nrow = n_cycles + 1, ncol = n_states)
+m_disu_retinaltear            <- matrix(disu_retinaltear, nrow = n_cycles + 1, ncol = n_states)
+
+#### Adverse events probabilities and calculations ----
+p_conjunctivalbleb_PDS_month1       <- 0.044             # Probability conjunctival bleb PDS <37 days
+p_vitreoushemorrhage_PDS_month1     <- 0.048             # Probability vitreous hemorrhage PDS <37 days
+p_cataract_PDS_month1               <- 0.004             # Probability cataract PDS <37 days 
+p_conjunctivalerosion_PDS_month1    <- 0.004             # Probability conjunctival erosion PDS <37 days
+p_conjunctivalretraction_PDS_month1 <- 0.004             # Probability conjunctival retraction PDS <37 days
+p_endophthalmitis_PDS_month1        <- 0                 # Probability endopthalmitis PDS <37 days
+p_retinaldetachment_PDS_month1      <- 0.004             # Probability retinal detachment PDS <37 days
+p_hyphema_PDS_month1                <- 0.004             # Probability hyphema PDS <37 days
+p_implantdislocation_PDS_month1     <- 0                 # Probability implant dislocation PDS <37 days
+p_conjunctivalbleb_PDS_month2       <- 0.028             # Probability conjunctival bleb PDS >37 days
+p_vitreoushemorrhage_PDS_month2     <- 0.012             # Probability vitreous hemorrhage PDS <>7 days
+p_cataract_PDS_month2               <- 0.089             # Probability cataract PDS >37 days 
+p_conjunctivalerosion_PDS_month2    <- 0.036             # Probability conjunctival erosion PDS >37 days 
+p_conjunctivalretraction_PDS_month2 <- 0.002             # Probability conjunctival retraction PDS >37 days
+p_endophthalmitis_PDS_month2        <- 0.016             # Probability endopthalmitis PDS >37 days
+p_retinaldetachment_PDS_month2      <- 0.04              # Probability retinal detachment PDS >37 days
+p_hyphema_PDS_month2                <- 0                 # Probability hyphema PDS >37 days
+p_implantdislocation_PDS_month2     <- 0.016             # Probability implant dislocation PDS >37 days
+
+r_conjunctivalbleb_PDS_month1         <- prob_to_rate(p_conjunctivalbleb_PDS_month1, t=37)      # Convert probability <37 days to daily rate
+r_vitreoushemorrhage_PDS_month1       <- prob_to_rate(p_vitreoushemorrhage_PDS_month1, t=37)      
+r_cataract_PDS_month1                 <- prob_to_rate(p_cataract_PDS_month1, t=37)     
+r_conjunctivalerosion_PDS_month1      <- prob_to_rate(p_conjunctivalerosion_PDS_month1, t=37)      
+r_conjunctivalretraction_PDS_month1   <- prob_to_rate(p_conjunctivalretraction_PDS_month1, t=37)      
+r_endophthalmitis_PDS_month1          <- prob_to_rate(p_endophthalmitis_PDS_month1, t=37)      
+r_retinaldetachment_PDS_month1        <- prob_to_rate(p_retinaldetachment_PDS_month1, t=37)     
+r_hyphema_PDS_month1                  <- prob_to_rate(p_hyphema_PDS_month1, t=37)     
+r_implantdislocation_PDS_month1       <- prob_to_rate(p_implantdislocation_PDS_month1, t=37)     
+r_conjunctivalbleb_PDS_month2         <- prob_to_rate(p_conjunctivalbleb_PDS_month2, t=693)     # Convert probability <37 days to daily rate
+r_vitreoushemorrhage_PDS_month2       <- prob_to_rate(p_vitreoushemorrhage_PDS_month2, t=693)    
+r_cataract_PDS_month2                 <- prob_to_rate(p_cataract_PDS_month2, t=693)     
+r_conjunctivalerosion_PDS_month2      <- prob_to_rate(p_conjunctivalerosion_PDS_month2, t=693)      
+r_conjunctivalretraction_PDS_month2   <- prob_to_rate(p_conjunctivalretraction_PDS_month2, t=693)      
+r_endophthalmitis_PDS_month2          <- prob_to_rate(p_endophthalmitis_PDS_month2, t=693)     
+r_retinaldetachment_PDS_month2        <- prob_to_rate(p_retinaldetachment_PDS_month2, t=693)     
+r_hyphema_PDS_month2                  <- prob_to_rate(p_hyphema_PDS_month2, t=693)      
+r_implantdislocation_PDS_month2       <- prob_to_rate(p_implantdislocation_PDS_month2, t=693)      
+
+r_conjunctivalbleb_PDS_Y1       <- r_conjunctivalbleb_PDS_month1*37 + r_conjunctivalbleb_PDS_month2*328.25     
+r_vitreoushemorrhage_PDS_Y1     <- r_vitreoushemorrhage_PDS_month1*37 + r_vitreoushemorrhage_PDS_month2*328.25             
+r_cataract_PDS_Y1               <- r_cataract_PDS_month1*37 + r_cataract_PDS_month2*328.25        
+r_conjunctivalerosion_PDS_Y1    <- r_conjunctivalerosion_PDS_month1*37 + r_conjunctivalerosion_PDS_month2*328.25        
+r_conjunctivalretraction_PDS_Y1 <- r_conjunctivalretraction_PDS_month1*37 + r_conjunctivalretraction_PDS_month2*328.25        
+r_endophthalmitis_PDS_Y1        <- r_endophthalmitis_PDS_month1*37 + r_endophthalmitis_PDS_month2*328.25       
+r_retinaldetachment_PDS_Y1      <- r_retinaldetachment_PDS_month1*37 + r_retinaldetachment_PDS_month2*328.25            
+r_hyphema_PDS_Y1                <- r_hyphema_PDS_month1*37 + r_hyphema_PDS_month2*328.25              
+r_implantdislocation_PDS_Y1     <- r_implantdislocation_PDS_month1*37 + r_implantdislocation_PDS_month2*328.25                  
+r_conjunctivalbleb_PDS_Y2       <- r_conjunctivalbleb_PDS_month2*365.25   
+r_vitreoushemorrhage_PDS_Y2     <- r_vitreoushemorrhage_PDS_month2*365.25  
+r_cataract_PDS_Y2               <- r_cataract_PDS_month2*365.25    
+r_conjunctivalerosion_PDS_Y2    <- r_conjunctivalerosion_PDS_month2*365.25          
+r_conjunctivalretraction_PDS_Y2 <- r_conjunctivalretraction_PDS_month2*365.25        
+r_endophthalmitis_PDS_Y2        <- r_endophthalmitis_PDS_month2*365.25  
+r_retinaldetachment_PDS_Y2      <- r_retinaldetachment_PDS_month2*365.25   
+r_hyphema_PDS_Y2                <- r_hyphema_PDS_month2*365.25      
+r_implantdislocation_PDS_Y2     <- r_implantdislocation_PDS_month2*365.25       
+
+p_conjunctivalbleb_PDS_Y1       <- rate_to_prob(r_conjunctivalbleb_PDS_Y1, t = 1)
+p_vitreoushemorrhage_PDS_Y1     <- rate_to_prob(r_vitreoushemorrhage_PDS_Y1, t = 1)        
+p_cataract_PDS_Y1               <- rate_to_prob(r_cataract_PDS_Y1, t = 1)
+p_conjunctivalerosion_PDS_Y1    <- rate_to_prob(r_conjunctivalerosion_PDS_Y1, t = 1)   
+p_conjunctivalretraction_PDS_Y1 <- rate_to_prob(r_conjunctivalretraction_PDS_Y1, t = 1)       
+p_endophthalmitis_PDS_Y1        <- rate_to_prob(r_endophthalmitis_PDS_Y1, t = 1) 
+p_retinaldetachment_PDS_Y1      <- rate_to_prob(r_retinaldetachment_PDS_Y1, t = 1) 
+p_hyphema_PDS_Y1                <- rate_to_prob(r_hyphema_PDS_Y1, t = 1)
+p_implantdislocation_PDS_Y1     <- rate_to_prob(r_implantdislocation_PDS_Y1, t = 1)           
+p_conjunctivalbleb_PDS_Y2       <- rate_to_prob(r_conjunctivalbleb_PDS_Y2, t = 1)
+p_vitreoushemorrhage_PDS_Y2     <- rate_to_prob(r_vitreoushemorrhage_PDS_Y2, t = 1) 
+p_cataract_PDS_Y2               <- rate_to_prob(r_cataract_PDS_Y2, t = 1)
+p_conjunctivalerosion_PDS_Y2    <- rate_to_prob(r_conjunctivalerosion_PDS_Y2, t = 1)   
+p_conjunctivalretraction_PDS_Y2 <- rate_to_prob(r_conjunctivalretraction_PDS_Y2, t = 1)
+p_endophthalmitis_PDS_Y2        <- rate_to_prob(r_endophthalmitis_PDS_Y2, t = 1)
+p_retinaldetachment_PDS_Y2      <- rate_to_prob(r_retinaldetachment_PDS_Y2, t = 1)
+p_hyphema_PDS_Y2                <- rate_to_prob(r_hyphema_PDS_Y2, t = 1)
+p_implantdislocation_PDS_Y2     <- rate_to_prob(r_implantdislocation_PDS_Y2, t = 1)
+
+p_cataract_IV                       <- 0.0016              # Annual probability cataract IV
+p_endophthalmitis_IV                <- 0.0047              # Annual probability endophtalmitis IV
+p_retinaldetachment_IV              <- 0.0008              # Annual probability retinal detachment IV
+p_retinaltear_IV                    <- 0.0033              # Annual probability retinal tear IV
+r_cataract_IV                       <- prob_to_rate(p_cataract_IV, t = 1) * rr_AEprobabilities_TREX
+r_endophthalmitis_IV                <- prob_to_rate(p_endophthalmitis_IV, t = 1) * rr_AEprobabilities_TREX
+r_retinaldetachment_IV              <- prob_to_rate(p_retinaldetachment_IV, t = 1) * rr_AEprobabilities_TREX
+r_retinaltear_IV                    <- prob_to_rate(p_retinaltear_IV, t = 1) * rr_AEprobabilities_TREX
+p_cataract_IV                       <- rate_to_prob(r_cataract_IV, t = 1)
+p_endophthalmitis_IV                <- rate_to_prob(r_endophthalmitis_IV, t = 1)
+p_retinaldetachment_IV              <- rate_to_prob(r_retinaldetachment_IV, t = 1)
+p_retinaltear_IV                    <- rate_to_prob(r_retinaltear_IV, t = 1)
+
+# Initialize AE probability matrices for treatment A
+m_prob_cataract_strA          <- matrix(p_cataract_IV, nrow = n_cycles + 1, ncol = n_states)
+m_prob_endophthalmitis_strA   <- matrix(p_endophthalmitis_IV, nrow = n_cycles + 1, ncol = n_states)
+m_prob_retinaldetachment_strA <- matrix(p_retinaldetachment_IV, nrow = n_cycles + 1, ncol = n_states)
+m_prob_retinaltear_strA       <- matrix(p_retinaltear_IV, nrow = n_cycles + 1, ncol = n_states)
+
+# Initialize a AE probability matrices for treatment B
+m_prob_cataract_strB          <- matrix(p_cataract_IV, nrow = n_cycles + 1, ncol = n_states)
+m_prob_endophthalmitis_strB   <- matrix(p_endophthalmitis_IV, nrow = n_cycles + 1, ncol = n_states)
+m_prob_retinaldetachment_strB <- matrix(p_retinaldetachment_IV, nrow = n_cycles + 1, ncol = n_states)
+m_prob_retinaltear_strB       <- matrix(p_retinaltear_IV, nrow = n_cycles + 1, ncol = n_states)
+
+# Initialize AE probability matrices for treatment C
+prob_vector                        <- c(p_conjunctivalbleb_PDS_Y1, rep(p_conjunctivalbleb_PDS_Y2, n_cycles))
+m_prob_conjunctivalbleb_strC       <- matrix(prob_vector, nrow = n_cycles + 1, ncol = n_states)
+prob_vector                        <- c(p_vitreoushemorrhage_PDS_Y1, rep(p_vitreoushemorrhage_PDS_Y2, n_cycles))
+m_prob_vitreoushemorrhage_strC     <- matrix(prob_vector, nrow = n_cycles + 1, ncol = n_states)
+prob_vector                        <- c(p_cataract_PDS_Y1, rep(p_cataract_PDS_Y2, n_cycles))
+m_prob_cataract_strC               <- matrix(prob_vector, nrow = n_cycles + 1, ncol = n_states)
+prob_vector                        <- c(p_conjunctivalerosion_PDS_Y1, rep(p_conjunctivalerosion_PDS_Y2, n_cycles))
+m_prob_conjunctivalerosion_strC    <- matrix(prob_vector, nrow = n_cycles + 1, ncol = n_states)
+prob_vector                        <- c(p_conjunctivalretraction_PDS_Y1, rep(p_conjunctivalretraction_PDS_Y2, n_cycles))
+m_prob_conjunctivalretraction_strC <- matrix(prob_vector, nrow = n_cycles + 1, ncol = n_states)
+prob_vector                        <- c(p_endophthalmitis_PDS_Y1, rep(p_endophthalmitis_PDS_Y2, n_cycles))
+m_prob_endophthalmitis_strC        <- matrix(prob_vector, nrow = n_cycles + 1, ncol = n_states)
+prob_vector                        <- c(p_retinaldetachment_PDS_Y1, rep(p_retinaldetachment_PDS_Y2, n_cycles))
+m_prob_retinaldetachment_strC      <- matrix(prob_vector, nrow = n_cycles + 1, ncol = n_states)
+prob_vector                        <- c(p_hyphema_PDS_Y1, rep(p_hyphema_PDS_Y2, n_cycles))
+m_prob_hyphema_strC                <- matrix(prob_vector, nrow = n_cycles + 1, ncol = n_states)
+prob_vector                        <- c(p_implantdislocation_PDS_Y1, rep(p_implantdislocation_PDS_Y2, n_cycles))
+m_prob_implantdislocation_strC     <- matrix(prob_vector, nrow = n_cycles + 1, ncol = n_states)
+
+
+### Discount weight for costs and effects ----
+v_dwc  <- 1 / ((1 + (d_c * cycle_length)) ^ (0:n_cycles))
+v_dwe  <- 1 / ((1 + (d_e * cycle_length)) ^ (0:n_cycles))
+
+# Process model inputs ----
+## Age-specific transition rates to the Dead state for all cycles ----
+v_r_BCVA0Dage <- v_r_HDage  <- rep(v_r_mort_by_age, each = 1/cycle_length)
+#* Name age-specific mortality vector 
+names(v_r_HDage) <- v_age_names
+
+#* compute mortality rates
+v_r_BCVA1Dage <- v_r_BCVA0Dage * hr_BCVA1D # Age-specific mortality rate in the first state
+v_r_BCVA2Dage <- v_r_BCVA0Dage * hr_BCVA2D # Age-specific mortality rate in the second state
+v_r_BCVA3Dage <- v_r_BCVA0Dage * hr_BCVA3D # Age-specific mortality rate in the third state 
+v_r_BCVA4Dage <- v_r_BCVA0Dage * hr_BCVA4D # Age-specific mortality rate in the fourth state 
+v_r_BCVA5Dage <- v_r_BCVA0Dage * hr_BCVA5D # Age-specific mortality rate in the fifth state 
+v_r_BCVA6Dage <- v_r_BCVA0Dage * hr_BCVA6D # Age-specific mortality rate in the sixth state 
+
+
+#* transform rates to probabilities adjusting by cycle length
+#* Function included in "R/Functions.R". The latest version can be found in `darthtools` package
+p_BCVA12dis  <- rate_to_prob(r = r_BCVA12dis, t = cycle_length) # constant annual probability of transitioning 
+p_BCVA13dis  <- rate_to_prob(r = r_BCVA13dis, t = cycle_length) # constant annual probability of transitioning 
+p_BCVA14dis  <- rate_to_prob(r = r_BCVA14dis, t = cycle_length) # constant annual probability of transitioning 
+p_BCVA15dis  <- rate_to_prob(r = r_BCVA15dis, t = cycle_length) # constant annual probability of transitioning 
+p_BCVA16dis  <- rate_to_prob(r = r_BCVA16dis, t = cycle_length) # constant annual probability of transitioning 
+p_BCVA21dis  <- rate_to_prob(r = r_BCVA21dis, t = cycle_length) # constant annual probability of transitioning 
+p_BCVA23dis  <- rate_to_prob(r = r_BCVA23dis, t = cycle_length) # constant annual probability of transitioning 
+p_BCVA24dis  <- rate_to_prob(r = r_BCVA24dis, t = cycle_length) # constant annual probability of transitioning 
+p_BCVA25dis  <- rate_to_prob(r = r_BCVA25dis, t = cycle_length) # constant annual probability of transitioning 
+p_BCVA26dis  <- rate_to_prob(r = r_BCVA26dis, t = cycle_length) # constant annual probability of transitioning 
+p_BCVA31dis  <- rate_to_prob(r = r_BCVA31dis, t = cycle_length) # constant annual probability of transitioning 
+p_BCVA32dis  <- rate_to_prob(r = r_BCVA32dis, t = cycle_length) # constant annual probability of transitioning 
+p_BCVA34dis  <- rate_to_prob(r = r_BCVA34dis, t = cycle_length) # constant annual probability of transitioning 
+p_BCVA35dis  <- rate_to_prob(r = r_BCVA35dis, t = cycle_length) # constant annual probability of transitioning  
+p_BCVA36dis  <- rate_to_prob(r = r_BCVA36dis, t = cycle_length) # constant annual probability of transitioning  
+p_BCVA41dis  <- rate_to_prob(r = r_BCVA41dis, t = cycle_length) # constant annual probability of transitioning 
+p_BCVA42dis  <- rate_to_prob(r = r_BCVA42dis, t = cycle_length) # constant annual probability of transitioning 
+p_BCVA43dis  <- rate_to_prob(r = r_BCVA43dis, t = cycle_length) # constant annual probability of transitioning 
+p_BCVA45dis  <- rate_to_prob(r = r_BCVA45dis, t = cycle_length) # constant annual probability of transitioning 
+p_BCVA46dis  <- rate_to_prob(r = r_BCVA46dis, t = cycle_length) # constant annual probability of transitioning  
+p_BCVA51dis  <- rate_to_prob(r = r_BCVA51dis, t = cycle_length) # constant annual probability of transitioning 
+p_BCVA52dis  <- rate_to_prob(r = r_BCVA52dis, t = cycle_length) # constant annual probability of transitioning 
+p_BCVA53dis  <- rate_to_prob(r = r_BCVA53dis, t = cycle_length) # constant annual probability of transitioning 
+p_BCVA54dis  <- rate_to_prob(r = r_BCVA54dis, t = cycle_length) # constant annual probability of transitioning  
+p_BCVA56dis  <- rate_to_prob(r = r_BCVA56dis, t = cycle_length) # constant annual probability of transitioning 
+p_BCVA61dis  <- rate_to_prob(r = r_BCVA61dis, t = cycle_length) # constant annual probability of transitioning 
+p_BCVA62dis  <- rate_to_prob(r = r_BCVA62dis, t = cycle_length) # constant annual probability of transitioning 
+p_BCVA63dis  <- rate_to_prob(r = r_BCVA63dis, t = cycle_length) # constant annual probability of transitioning 
+p_BCVA64dis  <- rate_to_prob(r = r_BCVA64dis, t = cycle_length) # constant annual probability of transitioning 
+p_BCVA65dis  <- rate_to_prob(r = r_BCVA65dis, t = cycle_length) # constant annual probability of transitioning 
+p_discontinue <- 0
+v_p_BCVA1Dage  <- rate_to_prob(v_r_BCVA1Dage, t = cycle_length)  # Age-specific mortality risk in the first stage
+v_p_BCVA2Dage  <- rate_to_prob(v_r_BCVA2Dage, t = cycle_length)  # Age-specific mortality risk in the second stage
+v_p_BCVA3Dage  <- rate_to_prob(v_r_BCVA3Dage, t = cycle_length)  # Age-specific mortality risk in the third stage
+v_p_BCVA4Dage  <- rate_to_prob(v_r_BCVA4Dage, t = cycle_length)  # Age-specific mortality risk in the fourth stage
+v_p_BCVA5Dage  <- rate_to_prob(v_r_BCVA5Dage, t = cycle_length)  # Age-specific mortality risk in the fifth stage
+v_p_BCVA6Dage  <- rate_to_prob(v_r_BCVA6Dage, t = cycle_length)  # Age-specific mortality risk in the sixth stage
+
+# Transition probabilities from Ferrante et al. (2022) year 1
+p_BCVA12y1  <- 0.12
+p_BCVA13y1  <- 0.01
+p_BCVA14y1  <- 0
+p_BCVA15y1  <- 0
+p_BCVA16y1  <- 0
+p_BCVA21y1  <- 0.49
+p_BCVA23y1  <- 0.12
+p_BCVA24y1  <- 0.01
+p_BCVA25y1  <- 0
+p_BCVA26y1  <- 0
+p_BCVA31y1  <- 0.13
+p_BCVA32y1  <- 0.36
+p_BCVA34y1  <- 0.13
+p_BCVA35y1  <- 0.01
+p_BCVA36y1  <- 0
+p_BCVA41y1  <- 0
+p_BCVA42y1  <- 0.18
+p_BCVA43y1  <- 0.41
+p_BCVA45y1  <- 0.12
+p_BCVA46y1  <- 0.01  
+p_BCVA51y1  <- 0
+p_BCVA52y1  <- 0
+p_BCVA53y1  <- 0
+p_BCVA54y1  <- 0.45
+p_BCVA56y1  <- 0.07
+p_BCVA61y1  <- 0
+p_BCVA62y1  <- 0
+p_BCVA63y1  <- 0
+p_BCVA64y1  <- 0.22
+p_BCVA65y1  <- 0.33
+#year 2
+p_BCVA12y2  <- 0.22
+p_BCVA13y2  <- 0
+p_BCVA14y2  <- 0
+p_BCVA15y2  <- 0
+p_BCVA16y2  <- 0
+p_BCVA21y2  <- 0.14
+p_BCVA23y2  <- 0.22
+p_BCVA24y2  <- 0
+p_BCVA25y2  <- 0
+p_BCVA26y2  <- 0
+p_BCVA31y2  <- 0
+p_BCVA32y2  <- 0.14
+p_BCVA34y2  <- 0.22
+p_BCVA35y2  <- 0
+p_BCVA36y2  <- 0
+p_BCVA41y2  <- 0
+p_BCVA42y2  <- 0
+p_BCVA43y2  <- 0.14
+p_BCVA45y2  <- 0.22
+p_BCVA46y2  <- 0  
+p_BCVA51y2  <- 0
+p_BCVA52y2  <- 0
+p_BCVA53y2  <- 0
+p_BCVA54y2  <- 0.14
+p_BCVA56y2  <- 0.22
+p_BCVA61y2  <- 0
+p_BCVA62y2  <- 0
+p_BCVA63y2  <- 0
+p_BCVA64y2  <- 0
+p_BCVA65y2  <- 0.14
+
+
+# Construct state-transition models ----
+## Initial state vector ----
+#* All starting unilateral
+v_m_init <- c(BCVA1 = 0, BCVA2 = 1, BCVA3 = 0, BCVA4 = 0, BCVA5 = 0, BCVA6 = 0, D = 0) # initial state vector
+v_m_init
+
+## Initialize cohort traces ----
+### Initialize cohort trace for strategy A ----
+m_M_strA <- matrix(NA, 
+              nrow = (n_cycles + 1), ncol = n_states, 
+              dimnames = list(0:n_cycles, v_names_states))
+#* Store the initial state vector in the first row of the cohort trace
+m_M_strA[1, ] <- v_m_init
+
+### Initialize cohort trace for strategies B and AB ----
+#* Structure and initial states are the same as for strA
+m_M_strB  <- m_M_strA # Strategy B
+m_M_strC  <- m_M_strA # Strategy C
+
+## Create transition probability arrays for strategy strategy A ----
+### Initialize transition probability array for strategy strategy A ----
+#* All transitions to a non-death state are assumed to be conditional on survival
+# Define transition probabilities for year 1
+a_P_strA_year1 <- array(0,
+                        dim  = c(n_states, n_states, 1),  # Considering only year 1
+                        dimnames = list(v_names_states, 
+                                        v_names_states, 
+                                        1))
+
+# Define transition probabilities for year 2
+a_P_strA_year2 <- array(0,
+                        dim  = c(n_states, n_states, n_cycles - 1),  # Excluding year 1
+                        dimnames = list(v_names_states, 
+                                        v_names_states, 
+                                        1:(n_cycles - 1)))
+### Fill in array for year 1
+## From BCVA1
+a_P_strA_year1["BCVA1", "BCVA1", 1]  <- (1 - v_p_BCVA1Dage[1]) * p_discontinue * (1 - (p_BCVA12dis + p_BCVA13dis + p_BCVA14dis + p_BCVA15dis + p_BCVA16dis)) + (1 - v_p_BCVA1Dage[1]) * (1 - p_discontinue) * (1 - (p_BCVA12y1 + p_BCVA13y1 + p_BCVA14y1 + p_BCVA15y1 + p_BCVA16y1))
+a_P_strA_year1["BCVA1", "BCVA2", 1]  <- (1 - v_p_BCVA1Dage[1]) * p_discontinue * p_BCVA12dis + (1 - v_p_BCVA1Dage[1]) * (1 - p_discontinue) * p_BCVA12y1
+a_P_strA_year1["BCVA1", "BCVA3", 1]  <- (1 - v_p_BCVA1Dage[1]) * p_discontinue * p_BCVA13dis + (1 - v_p_BCVA1Dage[1]) * (1 - p_discontinue) * p_BCVA13y1
+a_P_strA_year1["BCVA1", "BCVA4", 1]  <- (1 - v_p_BCVA1Dage[1]) * p_discontinue * p_BCVA14dis + (1 - v_p_BCVA1Dage[1]) * (1 - p_discontinue) * p_BCVA14y1
+a_P_strA_year1["BCVA1", "BCVA5", 1]  <- (1 - v_p_BCVA1Dage[1]) * p_discontinue * p_BCVA15dis + (1 - v_p_BCVA1Dage[1]) * (1 - p_discontinue) * p_BCVA15y1
+a_P_strA_year1["BCVA1", "BCVA6", 1]  <- (1 - v_p_BCVA1Dage[1]) * p_discontinue * p_BCVA16dis + (1 - v_p_BCVA1Dage[1]) * (1 - p_discontinue) * p_BCVA16y1
+a_P_strA_year1["BCVA1", "D", 1]      <- v_p_BCVA1Dage[1]
+## From BCVA2
+a_P_strA_year1["BCVA2", "BCVA2", 1]  <- (1 - v_p_BCVA2Dage[1]) * p_discontinue * (1 - (p_BCVA21dis + p_BCVA23dis + p_BCVA24dis + p_BCVA25dis + p_BCVA26dis)) + (1 - v_p_BCVA2Dage[1]) * (1 - p_discontinue) * (1 - (p_BCVA21y1 + p_BCVA23y1 + p_BCVA24y1 + p_BCVA25y1 + p_BCVA26y1))
+a_P_strA_year1["BCVA2", "BCVA1", 1]  <- (1 - v_p_BCVA2Dage[1]) * p_discontinue * p_BCVA21dis + (1 - v_p_BCVA2Dage[1]) * (1 - p_discontinue) * p_BCVA21y1
+a_P_strA_year1["BCVA2", "BCVA3", 1]  <- (1 - v_p_BCVA2Dage[1]) * p_discontinue * p_BCVA23dis + (1 - v_p_BCVA2Dage[1]) * (1 - p_discontinue) * p_BCVA23y1
+a_P_strA_year1["BCVA2", "BCVA4", 1]  <- (1 - v_p_BCVA2Dage[1]) * p_discontinue * p_BCVA24dis + (1 - v_p_BCVA2Dage[1]) * (1 - p_discontinue) * p_BCVA24y1
+a_P_strA_year1["BCVA2", "BCVA5", 1]  <- (1 - v_p_BCVA2Dage[1]) * p_discontinue * p_BCVA25dis + (1 - v_p_BCVA2Dage[1]) * (1 - p_discontinue) * p_BCVA25y1
+a_P_strA_year1["BCVA2", "BCVA6", 1]  <- (1 - v_p_BCVA2Dage[1]) * p_discontinue * p_BCVA26dis + (1 - v_p_BCVA2Dage[1]) * (1 - p_discontinue) * p_BCVA26y1
+a_P_strA_year1["BCVA2", "D", 1]      <- v_p_BCVA2Dage[1]
+## From BCVA3
+a_P_strA_year1["BCVA3", "BCVA3", 1]  <- (1 - v_p_BCVA3Dage[1]) * p_discontinue * (1 - (p_BCVA31dis + p_BCVA32dis + p_BCVA34dis + p_BCVA35dis + p_BCVA36dis)) + (1 - v_p_BCVA3Dage[1]) * (1 - p_discontinue) * (1 - (p_BCVA31y1 + p_BCVA32y1 + p_BCVA34y1 + p_BCVA35y1 + p_BCVA36y1))  
+a_P_strA_year1["BCVA3", "BCVA1", 1]  <- (1 - v_p_BCVA3Dage[1]) * p_discontinue * p_BCVA31dis + (1 - v_p_BCVA3Dage[1]) * (1 - p_discontinue) * p_BCVA31y1
+a_P_strA_year1["BCVA3", "BCVA2", 1]  <- (1 - v_p_BCVA3Dage[1]) * p_discontinue * p_BCVA32dis + (1 - v_p_BCVA3Dage[1]) * (1 - p_discontinue) * p_BCVA32y1
+a_P_strA_year1["BCVA3", "BCVA4", 1]  <- (1 - v_p_BCVA3Dage[1]) * p_discontinue * p_BCVA34dis + (1 - v_p_BCVA3Dage[1]) * (1 - p_discontinue) * p_BCVA34y1
+a_P_strA_year1["BCVA3", "BCVA5", 1]  <- (1 - v_p_BCVA3Dage[1]) * p_discontinue * p_BCVA35dis + (1 - v_p_BCVA3Dage[1]) * (1 - p_discontinue) * p_BCVA35y1
+a_P_strA_year1["BCVA3", "BCVA6", 1]  <- (1 - v_p_BCVA3Dage[1]) * p_discontinue * p_BCVA36dis + (1 - v_p_BCVA3Dage[1]) * (1 - p_discontinue) * p_BCVA36y1
+a_P_strA_year1["BCVA3", "D", 1]      <- v_p_BCVA3Dage[1]
+## From BCVA4
+a_P_strA_year1["BCVA4", "BCVA4", 1]  <- (1 - v_p_BCVA4Dage[1]) * p_discontinue * (1 - (p_BCVA41dis + p_BCVA42dis + p_BCVA43dis + p_BCVA45dis + p_BCVA46dis)) + (1 - v_p_BCVA4Dage[1]) * (1 - p_discontinue) * (1 - (p_BCVA41y1 + p_BCVA42y1 + p_BCVA43y1 + p_BCVA45y1 + p_BCVA46y1))
+a_P_strA_year1["BCVA4", "BCVA1", 1]  <- (1 - v_p_BCVA4Dage[1]) * p_discontinue * p_BCVA41dis + (1 - v_p_BCVA4Dage[1]) * (1 - p_discontinue) * p_BCVA41y1
+a_P_strA_year1["BCVA4", "BCVA2", 1]  <- (1 - v_p_BCVA4Dage[1]) * p_discontinue * p_BCVA42dis + (1 - v_p_BCVA4Dage[1]) * (1 - p_discontinue) * p_BCVA42y1
+a_P_strA_year1["BCVA4", "BCVA3", 1]  <- (1 - v_p_BCVA4Dage[1]) * p_discontinue * p_BCVA43dis + (1 - v_p_BCVA4Dage[1]) * (1 - p_discontinue) * p_BCVA43y1
+a_P_strA_year1["BCVA4", "BCVA5", 1]  <- (1 - v_p_BCVA4Dage[1]) * p_discontinue * p_BCVA45dis + (1 - v_p_BCVA4Dage[1]) * (1 - p_discontinue) * p_BCVA45y1
+a_P_strA_year1["BCVA4", "BCVA6", 1]  <- (1 - v_p_BCVA4Dage[1]) * p_discontinue * p_BCVA46dis + (1 - v_p_BCVA4Dage[1]) * (1 - p_discontinue) * p_BCVA46y1
+a_P_strA_year1["BCVA4", "D", 1]      <- v_p_BCVA4Dage[1]
+## From BCVA5
+a_P_strA_year1["BCVA5", "BCVA5", 1]  <- (1 - v_p_BCVA5Dage[1]) * p_discontinue * (1 - (p_BCVA51dis + p_BCVA52dis + p_BCVA53dis + p_BCVA54dis + p_BCVA56dis)) + (1 - v_p_BCVA5Dage[1]) * (1 - p_discontinue) * (1 - (p_BCVA51y1 + p_BCVA52y1 + p_BCVA53y1 + p_BCVA54y1 + p_BCVA56y1))
+a_P_strA_year1["BCVA5", "BCVA1", 1]  <- (1 - v_p_BCVA5Dage[1]) * p_discontinue * p_BCVA51dis + (1 - v_p_BCVA5Dage[1]) * (1 - p_discontinue) * p_BCVA51y1
+a_P_strA_year1["BCVA5", "BCVA2", 1]  <- (1 - v_p_BCVA5Dage[1]) * p_discontinue * p_BCVA52dis + (1 - v_p_BCVA5Dage[1]) * (1 - p_discontinue) * p_BCVA52y1
+a_P_strA_year1["BCVA5", "BCVA3", 1]  <- (1 - v_p_BCVA5Dage[1]) * p_discontinue * p_BCVA53dis + (1 - v_p_BCVA5Dage[1]) * (1 - p_discontinue) * p_BCVA53y1
+a_P_strA_year1["BCVA5", "BCVA4", 1]  <- (1 - v_p_BCVA5Dage[1]) * p_discontinue * p_BCVA54dis + (1 - v_p_BCVA5Dage[1]) * (1 - p_discontinue) * p_BCVA54y1
+a_P_strA_year1["BCVA5", "BCVA6", 1]  <- (1 - v_p_BCVA5Dage[1]) * p_discontinue * p_BCVA56dis + (1 - v_p_BCVA5Dage[1]) * (1 - p_discontinue) * p_BCVA56y1
+a_P_strA_year1["BCVA5", "D", 1]      <- v_p_BCVA5Dage[1]
+## From BCVA6
+a_P_strA_year1["BCVA6", "BCVA6", 1]  <- (1 - v_p_BCVA6Dage[1]) * p_discontinue * (1 - (p_BCVA61dis + p_BCVA62dis + p_BCVA63dis + p_BCVA64dis + p_BCVA65dis)) + (1 - v_p_BCVA6Dage[1]) * (1 - p_discontinue) * (1 - (p_BCVA61y1 + p_BCVA62y1 + p_BCVA63y1 + p_BCVA64y1 + p_BCVA65y1))
+a_P_strA_year1["BCVA6", "BCVA1", 1]  <- (1 - v_p_BCVA6Dage[1]) * p_discontinue * p_BCVA61dis + (1 - v_p_BCVA6Dage[1]) * (1 - p_discontinue) * p_BCVA61y1
+a_P_strA_year1["BCVA6", "BCVA2", 1]  <- (1 - v_p_BCVA6Dage[1]) * p_discontinue * p_BCVA62dis + (1 - v_p_BCVA6Dage[1]) * (1 - p_discontinue) * p_BCVA62y1
+a_P_strA_year1["BCVA6", "BCVA3", 1]  <- (1 - v_p_BCVA6Dage[1]) * p_discontinue * p_BCVA63dis + (1 - v_p_BCVA6Dage[1]) * (1 - p_discontinue) * p_BCVA63y1
+a_P_strA_year1["BCVA6", "BCVA4", 1]  <- (1 - v_p_BCVA6Dage[1]) * p_discontinue * p_BCVA64dis + (1 - v_p_BCVA6Dage[1]) * (1 - p_discontinue) * p_BCVA64y1
+a_P_strA_year1["BCVA6", "BCVA5", 1]  <- (1 - v_p_BCVA6Dage[1]) * p_discontinue * p_BCVA65dis + (1 - v_p_BCVA6Dage[1]) * (1 - p_discontinue) * p_BCVA65y1
+a_P_strA_year1["BCVA6", "D", 1]      <- v_p_BCVA6Dage[1]
+## From D
+a_P_strA_year1["D", "D", 1]          <- 1
+
+
+### Fill in array for year 2
+## From BCVA1
+a_P_strA_year2["BCVA1", "BCVA1", ]  <- (1 - v_p_BCVA1Dage[2:n_cycles]) * p_discontinue * (1 - (p_BCVA12dis + p_BCVA13dis + p_BCVA14dis + p_BCVA15dis + p_BCVA16dis)) + (1 - v_p_BCVA1Dage[2:n_cycles]) * (1 - p_discontinue) * (1 - (p_BCVA12y2 + p_BCVA13y2 + p_BCVA14y2 + p_BCVA15y2 + p_BCVA16y2))
+a_P_strA_year2["BCVA1", "BCVA2", ]  <- (1 - v_p_BCVA1Dage[2:n_cycles]) * p_discontinue * p_BCVA12dis + (1 - v_p_BCVA1Dage[2:n_cycles]) * (1 - p_discontinue) * p_BCVA12y2
+a_P_strA_year2["BCVA1", "BCVA3", ]  <- (1 - v_p_BCVA1Dage[2:n_cycles]) * p_discontinue * p_BCVA13dis + (1 - v_p_BCVA1Dage[2:n_cycles]) * (1 - p_discontinue) * p_BCVA13y2
+a_P_strA_year2["BCVA1", "BCVA4", ]  <- (1 - v_p_BCVA1Dage[2:n_cycles]) * p_discontinue * p_BCVA14dis + (1 - v_p_BCVA1Dage[2:n_cycles]) * (1 - p_discontinue) * p_BCVA14y2
+a_P_strA_year2["BCVA1", "BCVA5", ]  <- (1 - v_p_BCVA1Dage[2:n_cycles]) * p_discontinue * p_BCVA15dis + (1 - v_p_BCVA1Dage[2:n_cycles]) * (1 - p_discontinue) * p_BCVA15y2
+a_P_strA_year2["BCVA1", "BCVA6", ]  <- (1 - v_p_BCVA1Dage[2:n_cycles]) * p_discontinue * p_BCVA16dis + (1 - v_p_BCVA1Dage[2:n_cycles]) * (1 - p_discontinue) * p_BCVA16y2
+a_P_strA_year2["BCVA1", "D", ]      <- v_p_BCVA1Dage[2:n_cycles]
+## From BCVA2
+a_P_strA_year2["BCVA2", "BCVA2", ]  <- (1 - v_p_BCVA2Dage[2:n_cycles]) * p_discontinue * (1 - (p_BCVA21dis + p_BCVA23dis + p_BCVA24dis + p_BCVA25dis + p_BCVA26dis)) + (1 - v_p_BCVA2Dage[2:n_cycles]) * (1 - p_discontinue) * (1 - (p_BCVA21y2 + p_BCVA23y2 + p_BCVA24y2 + p_BCVA25y2 + p_BCVA26y2))
+a_P_strA_year2["BCVA2", "BCVA1", ]  <- (1 - v_p_BCVA2Dage[2:n_cycles]) * p_discontinue * p_BCVA21dis + (1 - v_p_BCVA2Dage[2:n_cycles]) * (1 - p_discontinue) * p_BCVA21y2
+a_P_strA_year2["BCVA2", "BCVA3", ]  <- (1 - v_p_BCVA2Dage[2:n_cycles]) * p_discontinue * p_BCVA23dis + (1 - v_p_BCVA2Dage[2:n_cycles]) * (1 - p_discontinue) * p_BCVA23y2
+a_P_strA_year2["BCVA2", "BCVA4", ]  <- (1 - v_p_BCVA2Dage[2:n_cycles]) * p_discontinue * p_BCVA24dis + (1 - v_p_BCVA2Dage[2:n_cycles]) * (1 - p_discontinue) * p_BCVA24y2
+a_P_strA_year2["BCVA2", "BCVA5", ]  <- (1 - v_p_BCVA2Dage[2:n_cycles]) * p_discontinue * p_BCVA25dis + (1 - v_p_BCVA2Dage[2:n_cycles]) * (1 - p_discontinue) * p_BCVA25y2
+a_P_strA_year2["BCVA2", "BCVA6", ]  <- (1 - v_p_BCVA2Dage[2:n_cycles]) * p_discontinue * p_BCVA26dis + (1 - v_p_BCVA2Dage[2:n_cycles]) * (1 - p_discontinue) * p_BCVA26y2
+a_P_strA_year2["BCVA2", "D", ]      <- v_p_BCVA2Dage[2:n_cycles]
+## From BCVA3
+a_P_strA_year2["BCVA3", "BCVA3", ]  <- (1 - v_p_BCVA3Dage[2:n_cycles]) * p_discontinue * (1 - (p_BCVA31dis + p_BCVA32dis + p_BCVA34dis + p_BCVA35dis + p_BCVA36dis)) + (1 - v_p_BCVA3Dage[2:n_cycles]) * (1 - p_discontinue) * (1 - (p_BCVA31y2 + p_BCVA32y2 + p_BCVA34y2 + p_BCVA35y2 + p_BCVA36y2))  
+a_P_strA_year2["BCVA3", "BCVA1", ]  <- (1 - v_p_BCVA3Dage[2:n_cycles]) * p_discontinue * p_BCVA31dis + (1 - v_p_BCVA3Dage[2:n_cycles]) * (1 - p_discontinue) * p_BCVA31y2
+a_P_strA_year2["BCVA3", "BCVA2", ]  <- (1 - v_p_BCVA3Dage[2:n_cycles]) * p_discontinue * p_BCVA32dis + (1 - v_p_BCVA3Dage[2:n_cycles]) * (1 - p_discontinue) * p_BCVA32y2
+a_P_strA_year2["BCVA3", "BCVA4", ]  <- (1 - v_p_BCVA3Dage[2:n_cycles]) * p_discontinue * p_BCVA34dis + (1 - v_p_BCVA3Dage[2:n_cycles]) * (1 - p_discontinue) * p_BCVA34y2
+a_P_strA_year2["BCVA3", "BCVA5", ]  <- (1 - v_p_BCVA3Dage[2:n_cycles]) * p_discontinue * p_BCVA35dis + (1 - v_p_BCVA3Dage[2:n_cycles]) * (1 - p_discontinue) * p_BCVA35y2
+a_P_strA_year2["BCVA3", "BCVA6", ]  <- (1 - v_p_BCVA3Dage[2:n_cycles]) * p_discontinue * p_BCVA36dis + (1 - v_p_BCVA3Dage[2:n_cycles]) * (1 - p_discontinue) * p_BCVA36y2
+a_P_strA_year2["BCVA3", "D", ]      <- v_p_BCVA3Dage[2:n_cycles]
+## From BCVA4
+a_P_strA_year2["BCVA4", "BCVA4", ]  <- (1 - v_p_BCVA4Dage[2:n_cycles]) * p_discontinue * (1 - (p_BCVA41dis + p_BCVA42dis + p_BCVA43dis + p_BCVA45dis + p_BCVA46dis)) + (1 - v_p_BCVA4Dage[2:n_cycles]) * (1 - p_discontinue) * (1 - (p_BCVA41y2 + p_BCVA42y2 + p_BCVA43y2 + p_BCVA45y2 + p_BCVA46y2))
+a_P_strA_year2["BCVA4", "BCVA1", ]  <- (1 - v_p_BCVA4Dage[2:n_cycles]) * p_discontinue * p_BCVA41dis + (1 - v_p_BCVA4Dage[2:n_cycles]) * (1 - p_discontinue) * p_BCVA41y2
+a_P_strA_year2["BCVA4", "BCVA2", ]  <- (1 - v_p_BCVA4Dage[2:n_cycles]) * p_discontinue * p_BCVA42dis + (1 - v_p_BCVA4Dage[2:n_cycles]) * (1 - p_discontinue) * p_BCVA42y2
+a_P_strA_year2["BCVA4", "BCVA3", ]  <- (1 - v_p_BCVA4Dage[2:n_cycles]) * p_discontinue * p_BCVA43dis + (1 - v_p_BCVA4Dage[2:n_cycles]) * (1 - p_discontinue) * p_BCVA43y2
+a_P_strA_year2["BCVA4", "BCVA5", ]  <- (1 - v_p_BCVA4Dage[2:n_cycles]) * p_discontinue * p_BCVA45dis + (1 - v_p_BCVA4Dage[2:n_cycles]) * (1 - p_discontinue) * p_BCVA45y2
+a_P_strA_year2["BCVA4", "BCVA6", ]  <- (1 - v_p_BCVA4Dage[2:n_cycles]) * p_discontinue * p_BCVA46dis + (1 - v_p_BCVA4Dage[2:n_cycles]) * (1 - p_discontinue) * p_BCVA46y2
+a_P_strA_year2["BCVA4", "D", ]      <- v_p_BCVA4Dage[2:n_cycles]
+## From BCVA5
+a_P_strA_year2["BCVA5", "BCVA5", ]  <- (1 - v_p_BCVA5Dage[2:n_cycles]) * p_discontinue * (1 - (p_BCVA51dis + p_BCVA52dis + p_BCVA53dis + p_BCVA54dis + p_BCVA56dis)) + (1 - v_p_BCVA5Dage[2:n_cycles]) * (1 - p_discontinue) * (1 - (p_BCVA51y2 + p_BCVA52y2 + p_BCVA53y2 + p_BCVA54y2 + p_BCVA56y2))
+a_P_strA_year2["BCVA5", "BCVA1", ]  <- (1 - v_p_BCVA5Dage[2:n_cycles]) * p_discontinue * p_BCVA51dis + (1 - v_p_BCVA5Dage[2:n_cycles]) * (1 - p_discontinue) * p_BCVA51y2
+a_P_strA_year2["BCVA5", "BCVA2", ]  <- (1 - v_p_BCVA5Dage[2:n_cycles]) * p_discontinue * p_BCVA52dis + (1 - v_p_BCVA5Dage[2:n_cycles]) * (1 - p_discontinue) * p_BCVA52y2
+a_P_strA_year2["BCVA5", "BCVA3", ]  <- (1 - v_p_BCVA5Dage[2:n_cycles]) * p_discontinue * p_BCVA53dis + (1 - v_p_BCVA5Dage[2:n_cycles]) * (1 - p_discontinue) * p_BCVA53y2
+a_P_strA_year2["BCVA5", "BCVA4", ]  <- (1 - v_p_BCVA5Dage[2:n_cycles]) * p_discontinue * p_BCVA54dis + (1 - v_p_BCVA5Dage[2:n_cycles]) * (1 - p_discontinue) * p_BCVA54y2
+a_P_strA_year2["BCVA5", "BCVA6", ]  <- (1 - v_p_BCVA5Dage[2:n_cycles]) * p_discontinue * p_BCVA56dis + (1 - v_p_BCVA5Dage[2:n_cycles]) * (1 - p_discontinue) * p_BCVA56y2
+a_P_strA_year2["BCVA5", "D", ]      <- v_p_BCVA5Dage[2:n_cycles]
+## From BCVA6
+a_P_strA_year2["BCVA6", "BCVA6", ]  <- (1 - v_p_BCVA6Dage[2:n_cycles]) * p_discontinue * (1 - (p_BCVA61dis + p_BCVA62dis + p_BCVA63dis + p_BCVA64dis + p_BCVA65dis)) + (1 - v_p_BCVA6Dage[2:n_cycles]) * (1 - p_discontinue) * (1 - (p_BCVA61y2 + p_BCVA62y2 + p_BCVA63y2 + p_BCVA64y2 + p_BCVA65y2))
+a_P_strA_year2["BCVA6", "BCVA1", ]  <- (1 - v_p_BCVA6Dage[2:n_cycles]) * p_discontinue * p_BCVA61dis + (1 - v_p_BCVA6Dage[2:n_cycles]) * (1 - p_discontinue) * p_BCVA61y2
+a_P_strA_year2["BCVA6", "BCVA2", ]  <- (1 - v_p_BCVA6Dage[2:n_cycles]) * p_discontinue * p_BCVA62dis + (1 - v_p_BCVA6Dage[2:n_cycles]) * (1 - p_discontinue) * p_BCVA62y2
+a_P_strA_year2["BCVA6", "BCVA3", ]  <- (1 - v_p_BCVA6Dage[2:n_cycles]) * p_discontinue * p_BCVA63dis + (1 - v_p_BCVA6Dage[2:n_cycles]) * (1 - p_discontinue) * p_BCVA63y2
+a_P_strA_year2["BCVA6", "BCVA4", ]  <- (1 - v_p_BCVA6Dage[2:n_cycles]) * p_discontinue * p_BCVA64dis + (1 - v_p_BCVA6Dage[2:n_cycles]) * (1 - p_discontinue) * p_BCVA64y2
+a_P_strA_year2["BCVA6", "BCVA5", ]  <- (1 - v_p_BCVA6Dage[2:n_cycles]) * p_discontinue * p_BCVA65dis + (1 - v_p_BCVA6Dage[2:n_cycles]) * (1 - p_discontinue) * p_BCVA65y2
+a_P_strA_year2["BCVA6", "D", ]      <- v_p_BCVA6Dage[2:n_cycles]
+## From D
+a_P_strA_year2["D", "D", ]          <- 1
+
+# Combine transition probabilities for all years. Be aware that by combining the two arrays, the column heading do not make sense anymore. 
+a_P_strA <- abind::abind(a_P_strA_year1, a_P_strA_year2, along = 3)
+
+### Initialize transition probability array for strategy B ----
+a_P_strB <- a_P_strA
+### Initialize transition probability array for strategy C as a copy of B's ----
+a_P_strC <- a_P_strA
+
+## Check if transition probability arrays are valid ----
+#* Functions included in "R/Functions.R". The latest version can be found in `darthtools` package
+### Check that transition probabilities are [0, 1] ----
+check_transition_probability(a_P_strA, verbose = TRUE)
+check_transition_probability(a_P_strB, verbose = TRUE)
+check_transition_probability(a_P_strC, verbose = TRUE)
+### Check that all rows for each slice of the array sum to 1 ----
+check_sum_of_transition_array(a_P_strA, n_states = n_states, n_cycles = n_cycles, verbose = TRUE)
+check_sum_of_transition_array(a_P_strB, n_states = n_states, n_cycles = n_cycles, verbose = TRUE)
+check_sum_of_transition_array(a_P_strC, n_states = n_states, n_cycles = n_cycles, verbose = TRUE)
+### Check if I lose patients in the transitions ----
+no_loss_detected <- TRUE  # Flag to track if any loss is detected
+# Loop through each cycle and check the sum of transition probabilities
+for (cycle in 1:n_cycles) {
+  # Sum transition probabilities for each state
+  sum_probs <- apply(a_P_strA[, , cycle], 1, sum)
+  # Check if the sum equals 1 for each cycle
+  if (any(abs(sum_probs - 1) > 1e-6)) {  # Tolerance used for floating-point comparison
+    no_loss_detected <- FALSE
+    print(paste("Loss of patients detected in cycle", cycle))
+    # Print out states with non-1 probabilities for investigation
+    print(sum_probs)
+  }
+}
+# If no loss of patients is detected, print "Well done"
+if (no_loss_detected) {
+  print("Well done! No loss of patients detected.")
+}
+
+
+## Create transition dynamics arrays ----
+#* These arrays will capture transitions from each state to another over time 
+### Initialize transition dynamics array for strategy A ----
+a_A_strA <- array(0,
+                 dim      = c(n_states, n_states, n_cycles + 1),
+                 dimnames = list(v_names_states, v_names_states, 0:n_cycles))
+#* Set first slice of a_A_SoC with the initial state vector in its diagonal
+diag(a_A_strA[, , 1]) <- v_m_init
+### Initialize transition-dynamics array for strategies A, B, and AB ----
+#* Structure and initial states are the same as for SoC
+a_A_strB  <- a_A_strA
+a_A_strC <- a_A_strA
+
+
+#  Run Markov model ----
+#* Iterative solution of age-dependent cSTM
+for(t in 1:n_cycles){
+  ## Fill in cohort trace
+  # For strategy A
+  m_M_strA[t + 1, ] <- m_M_strA[t, ] %*% a_P_strA[, , t]
+  # For strategy B 
+  m_M_strB[t + 1, ] <- m_M_strB[t, ] %*% a_P_strB[, , t]
+  # For strategy C
+  m_M_strC[t + 1, ] <- m_M_strC[t, ] %*% a_P_strC[, , t]
+  
+  ## Fill in transition-dynamics array
+  # For strategy A
+  a_A_strA[, , t + 1] <- diag(m_M_strA[t, ]) %*% a_P_strA[, , t]
+  # For strategy B
+  a_A_strB[, , t + 1] <- diag(m_M_strB[t, ]) %*% a_P_strB[, , t]
+  # For strategy C
+  a_A_strC[, , t + 1] <- diag(m_M_strC[t, ]) %*% a_P_strC[, , t]
+}
+
+## Store the cohort traces in a list ----
+l_m_M <- list(A   =  m_M_strA,
+              B   =  m_M_strB,
+              C  =  m_M_strC)
+names(l_m_M) <- v_names_str
+
+## Store the transition dynamics array for each strategy in a list ----
+l_a_A <- list(A   =  a_A_strA,
+              B   =  a_A_strB,
+              C  =  a_A_strC)
+names(l_a_A) <- v_names_str
+
+
+# Plot Outputs ----
+#* (Functions included in "R/Functions.R"; depends on the `ggplot2` package)
+## Show Markov trace
+View(m_M_strA)
+View(m_M_strB)
+View(m_M_strC)
+
+## Plot the cohort trace for strategy A ----
+plot_trace(m_M_strA)
+## Plot the cohort trace for strategy B ----
+plot_trace(m_M_strB)
+## Plot the cohort trace for strategy C ----
+plot_trace(m_M_strC)
+## Plot the cohort trace for all strategies ----
+plot_trace_strategy(l_m_M)
+
+## Plot the epidemiology outcomes ----
+### Survival ----
+survival_plot <- plot_surv(l_m_M, v_names_death_states = "D") +
+  theme(legend.position = "bottom")
+survival_plot
+
+### Prevalence ----
+prevalence_BCVA1_plot   <- plot_prevalence(l_m_M, 
+                                        v_names_sick_states = c("BCVA1"), 
+                                        v_names_dead_states = "D")  +
+  theme(legend.position = "")
+prevalence_BCVA1_plot
+prevalence_BCVA2_plot   <- plot_prevalence(l_m_M, 
+                                           v_names_sick_states = c("BCVA2"), 
+                                           v_names_dead_states = "D")  +
+  theme(legend.position = "")
+prevalence_BCVA2_plot
+prevalence_BCVA3_plot   <- plot_prevalence(l_m_M, 
+                                           v_names_sick_states = c("BCVA3"), 
+                                           v_names_dead_states = "D")  +
+  theme(legend.position = "")
+prevalence_BCVA3_plot
+prevalence_BCVA4_plot   <- plot_prevalence(l_m_M, 
+                                           v_names_sick_states = c("BCVA4"), 
+                                           v_names_dead_states = "D")  +
+  theme(legend.position = "")
+prevalence_BCVA4_plot
+prevalence_BCVA5_plot   <- plot_prevalence(l_m_M, 
+                                           v_names_sick_states = c("BCVA5"), 
+                                           v_names_dead_states = "D")  +
+  theme(legend.position = "")
+prevalence_BCVA5_plot
+prevalence_BCVA6_plot   <- plot_prevalence(l_m_M, 
+                                           v_names_sick_states = c("BCVA6"), 
+                                           v_names_dead_states = "D")  +
+  theme(legend.position = "")
+prevalence_BCVA6_plot
+prevalence_D_plot   <- plot_prevalence(l_m_M, 
+                                           v_names_sick_states = c("D"), 
+                                           v_names_dead_states = "D")  +
+  theme(legend.position = "")
+prevalence_D_plot
+
+prop_BCVA1_plot     <- plot_proportion_sicker(l_m_M, 
+                                               v_names_sick_states = c("BCVA1", "BCVA2", "BCVA3", "BCVA4", "BCVA5", "BCVA6"), 
+                                               v_names_sicker_states = c("BCVA1")) +
+  theme(legend.position = "bottom")
+prop_BCVA1_plot
+
+## Combine plots ----
+gridExtra::grid.arrange(prevalence_BCVA1_plot, 
+                        prevalence_BCVA2_plot, 
+                        prevalence_BCVA3_plot,
+                        ncol = 1, heights = c(0.75, 0.75, 0.75, 0.75))
+
+gridExtra::grid.arrange(prevalence_BCVA4_plot,
+                        prevalence_BCVA5_plot,
+                        prevalence_BCVA6_plot,
+                        ncol = 1, heights = c(0.75, 0.75, 0.75))
+
+
+
+                                                  #####################
+################################################### State Rewards Costs ################################################### 
+                                                  #####################
+################################# Cost of blindness for all strategies ########################################
+m_cost_BCVA6 <- matrix(0, nrow = n_cycles + 1, ncol = n_states)
+m_cost_BCVA6[, 6]             <- c_BCVA6
+m_cost_BCVA6[n_cycles + 1, ]  <- 0 # override with zero's in last row when everyone is dead
+print(m_cost_BCVA6)
+
+################################# STRATEGY A ########################################
+# ---------------- Costs treatment  ----------------
+m_cost_treatment_strA <- matrix(c_afli_treatment, nrow = n_cycles + 1, ncol = n_states) # Matrix of costs per injection
+m_cost_treatment_strA[1, ]                <- m_cost_treatment_strA[1, ] * n_injections_strA_y1 # Multiply by injections to get total cost of treatment
+m_cost_treatment_strA[2, ]                <- m_cost_treatment_strA[2, ] * n_injections_strA_y2
+m_cost_treatment_strA[3:(n_cycles + 1), ] <- m_cost_treatment_strA[3:(n_cycles + 1), ] * n_injections_strA_y3
+m_cost_treatment_strA[n_cycles + 1, ]     <- 0 # override with zero's in last row when everyone is dead
+m_cost_treatment_strA[, n_states]         <- 0 # override with zero's in last column when everyone is dead
+m_cost_treatment_strA[, 6]                <- 0 # no treatment when blind
+print(m_cost_treatment_strA)
+
+# ---------------- Costs transport/leisure time treatment ----------------
+m_cost_transportleisure_strA <- matrix(c_transportleisure_totalpervisit_injectionmonitoring, nrow = n_cycles + 1, ncol = n_states) # Matrix of costs transport and leisure per visit
+m_cost_transportleisure_strA[1, ]                <- m_cost_transportleisure_strA[1, ] * n_injections_strA_y1 # Multiply by injections to get total cost of treatment
+m_cost_transportleisure_strA[2, ]                <- m_cost_transportleisure_strA[2, ] * n_injections_strA_y2
+m_cost_transportleisure_strA[3:(n_cycles + 1), ] <- m_cost_transportleisure_strA[3:(n_cycles + 1), ] * n_injections_strA_y3
+m_cost_transportleisure_strA[n_cycles + 1, ]     <- 0 # override with zero's in last row when everyone is dead
+m_cost_transportleisure_strA[, n_states]         <- 0 # override with zero's in last column when everyone is dead
+m_cost_transportleisure_strA[, 6]                <- 0 # no treatment when blind
+print(m_cost_transportleisure_strA)
+
+# ---------------- Costs adverse events ----------------
+m_c_cataract_strA              <- m_prob_cataract_strA * (m_c_cataract_perevent + n_treatment_cataract * m_cost_transportleisure_surgery + n_ophthalmologistvisit_cataract * m_cost_transportleisure_injectionmonitoring)
+m_c_endophthalmitis_strA       <- m_prob_endophthalmitis_strA * (m_c_endophthalmitis_perevent + n_endophthalmitis_parsplanavitrectomy * m_cost_transportleisure_surgery + n_ophthalmologistvisit_endophthalmitis * m_cost_transportleisure_injectionmonitoring)
+m_c_retinaldetachment_strA     <- m_prob_retinaldetachment_strA * (m_c_retinaldetachment_perevent + n_treatment_retinaldetachment * m_cost_transportleisure_surgery + n_ophthalmologistvisit_retinaldetachment * m_cost_transportleisure_injectionmonitoring)
+m_c_retinaltear_strA           <- m_prob_retinaltear_strA * (m_c_retinaltear_perevent  + n_treatment_retinaltear * m_cost_transportleisure_surgery + n_ophthalmologistvisit_retinaltear * m_cost_transportleisure_injectionmonitoring)
+m_cost_AE_strA                 <- m_c_cataract_strA + m_c_endophthalmitis_strA + m_c_retinaldetachment_strA + m_c_retinaltear_strA
+m_cost_AE_strA[n_cycles + 1, ] <- 0 # override with zero's in last row when everyone is dead
+m_cost_AE_strA[, n_states]     <- 0 # override with zero's in last column when everyone is dead
+m_cost_AE_strA[, 6]            <- 0 # no treatment when blind
+print(m_cost_AE_strA)
+
+# Add the costs matrices to get the final cost matrix 
+m_c_strA                 <- m_cost_treatment_strA + m_cost_transportleisure_strA + m_cost_AE_strA + m_cost_BCVA6
+m_c_strA[n_cycles + 1, ] <- 0 # override with zero's in last row when everyone is dead
+m_c_strA[, n_states]     <- 0 # override with zero's in last column when everyone is dead
+print (m_c_strA)
+
+
+################################# STRATEGY B ########################################
+# ---------------- Costs treatment  ----------------
+m_cost_treatment_strB <- matrix(c_beva_treatment, nrow = n_cycles + 1, ncol = n_states) # Matrix of costs per injection
+m_cost_treatment_strB[1, ]                <- m_cost_treatment_strB[1, ] * n_injections_strB_y1 # Multiply by injections to get total cost of treatment
+m_cost_treatment_strB[2, ]                <- m_cost_treatment_strB[2, ] * n_injections_strB_y2
+m_cost_treatment_strB[3:(n_cycles + 1), ] <- m_cost_treatment_strB[3:(n_cycles + 1), ] * n_injections_strB_y3
+m_cost_treatment_strB[n_cycles + 1, ]     <- 0 
+m_cost_treatment_strB[, n_states]         <- 0 
+m_cost_treatment_strB[, 6]                <- 0 
+print(m_cost_treatment_strB)
+
+# ---------------- Costs transport/leisure time treatment ----------------
+m_cost_transportleisure_strB <- matrix(c_transportleisure_totalpervisit_injectionmonitoring, nrow = n_cycles + 1, ncol = n_states) # Matrix of costs transport and leisure per visit
+m_cost_transportleisure_strB[1, ]                <- m_cost_transportleisure_strB[1, ] * n_injections_strB_y1 # Multiply by injections to get total cost of treatment
+m_cost_transportleisure_strB[2, ]                <- m_cost_transportleisure_strB[2, ] * n_injections_strB_y2
+m_cost_transportleisure_strB[3:(n_cycles + 1), ] <- m_cost_transportleisure_strB[3:(n_cycles + 1), ] * n_injections_strB_y3
+m_cost_transportleisure_strB[n_cycles + 1, ]     <- 0 
+m_cost_transportleisure_strB[, n_states]         <- 0 
+m_cost_transportleisure_strB[, 6]                <- 0 
+print(m_cost_transportleisure_strB)
+
+# ---------------- Costs adverse events ----------------
+m_c_cataract_strB              <- m_prob_cataract_strB * (m_c_cataract_perevent + n_treatment_cataract * m_cost_transportleisure_surgery + n_ophthalmologistvisit_cataract * m_cost_transportleisure_injectionmonitoring)
+m_c_endophthalmitis_strB       <- m_prob_endophthalmitis_strB * (m_c_endophthalmitis_perevent + n_endophthalmitis_parsplanavitrectomy * m_cost_transportleisure_surgery + n_ophthalmologistvisit_endophthalmitis * m_cost_transportleisure_injectionmonitoring)
+m_c_retinaldetachment_strB     <- m_prob_retinaldetachment_strB * (m_c_retinaldetachment_perevent + n_treatment_retinaldetachment * m_cost_transportleisure_surgery + n_ophthalmologistvisit_retinaldetachment * m_cost_transportleisure_injectionmonitoring)
+m_c_retinaltear_strB           <- m_prob_retinaltear_strB * (m_c_retinaltear_perevent  + n_treatment_retinaltear * m_cost_transportleisure_surgery + n_ophthalmologistvisit_retinaltear * m_cost_transportleisure_injectionmonitoring)
+m_cost_AE_strB                 <- m_c_cataract_strB + m_c_endophthalmitis_strB + m_c_retinaldetachment_strB + m_c_retinaltear_strB
+m_cost_AE_strB[n_cycles + 1, ] <- 0 
+m_cost_AE_strB[, n_states]     <- 0 
+m_cost_AE_strB[, 6]            <- 0 
+print(m_cost_AE_strB)
+
+# Add the costs matrices to get the final cost matrix 
+m_c_strB                  <- m_cost_treatment_strB + m_cost_transportleisure_strB + m_cost_AE_strB + m_cost_BCVA6
+m_c_strB[n_cycles + 1, ]  <- 0
+m_c_strB[, n_states]      <- 0 
+print (m_c_strB)
+
+
+
+
+################################# STRATEGY C ########################################
+# ---------------- Costs treatment  ----------------
+m_cost_treatment_strC <- matrix(c_PDS_treatment_Y2, nrow = n_cycles + 1, ncol = n_states) # Matrix of costs total treatment (number of visits already included)
+m_cost_treatment_strC[1, ]            <- c_PDS_treatment_Y1
+m_cost_treatment_strC[n_cycles + 1, ] <- 0 
+m_cost_treatment_strC[, n_states]     <- 0 
+m_cost_treatment_strC[, 6]            <- 0 
+print(m_cost_treatment_strC)
+
+# ---------------- Costs transport/leisure time treatment ----------------
+m_cost_transportleisure_strC <- matrix(0, nrow = n_cycles + 1, ncol = n_states) # Matrix of costs transport and leisure per visit
+m_cost_transportleisure_strC[1, ]                <- m_cost_transportleisure_strC[1, ] + n_PDS_surgery * m_cost_transportleisure_surgery[1, ] + n_injections_strC_y1 * m_cost_transportleisure_injectionmonitoring[1, ] + n_PDS_monitoring_Y1 * m_cost_transportleisure_injectionmonitoring[1, ] # Multiply by injections to get total cost of treatment
+m_cost_transportleisure_strC[2:(n_cycles + 1), ] <- m_cost_transportleisure_strC[2:(n_cycles + 1), ] + m_cost_transportleisure_injectionmonitoring[2:(n_cycles + 1), ] * (n_injections_strC_y2 + n_PDS_monitoring_Y2)
+m_cost_transportleisure_strC[n_cycles + 1, ]     <- 0 
+m_cost_transportleisure_strC[, n_states]         <- 0
+m_cost_transportleisure_strC[, 6]                <- 0 
+print(m_cost_transportleisure_strC)
+
+# ---------------- Costs adverse events ----------------
+m_c_conjunctivalbleb_strC        <- m_prob_conjunctivalbleb_strC * (m_c_conjunctivalbleb_perevent + n_ophthalmologistvisit_conjunctivalbleb * m_cost_transportleisure_injectionmonitoring) 
+m_c_vitreoushemorrhage_strC      <- m_prob_vitreoushemorrhage_strC * (m_c_vitreoushemorrhage_perevent +  n_treatment_vitreoushemorrhage * m_cost_transportleisure_surgery + n_ophthalmologistvisit_vitreoushemorrhage * m_cost_transportleisure_injectionmonitoring)
+m_c_cataract_strC                <- m_prob_cataract_strC * (m_c_cataract_perevent + n_treatment_cataract * m_cost_transportleisure_surgery + n_ophthalmologistvisit_cataract * m_cost_transportleisure_injectionmonitoring)
+m_c_conjunctivalerosion_strC     <- m_prob_conjunctivalerosion_strC * (m_c_conjunctivalerosion_perevent + n_ophthalmologistvisit_conjunctivalerosion * m_cost_transportleisure_injectionmonitoring)
+m_c_conjunctivalretraction_strC  <- m_prob_conjunctivalretraction_strC * (m_c_conjunctivalretraction_perevent + n_treatment_conjunctivalretraction * m_cost_transportleisure_surgery + n_ophthalmologistvisit_conjunctivalretraction * m_cost_transportleisure_injectionmonitoring)
+m_c_endophthalmitis_strC         <- m_prob_endophthalmitis_strC * (m_c_endophthalmitis_perevent + n_endophthalmitis_parsplanavitrectomy * m_cost_transportleisure_surgery + n_ophthalmologistvisit_endophthalmitis * m_cost_transportleisure_injectionmonitoring)
+m_c_retinaldetachment_strC       <- m_prob_retinaldetachment_strC * (m_c_retinaldetachment_perevent + n_treatment_retinaldetachment * m_cost_transportleisure_surgery + n_ophthalmologistvisit_retinaldetachment * m_cost_transportleisure_injectionmonitoring)
+m_c_hyphema_strC                 <- m_prob_hyphema_strC * (m_c_hyphema_perevent + n_treatment_hyphema * m_cost_transportleisure_surgery + n_ophthalmologistvisit_hyphema * m_cost_transportleisure_injectionmonitoring)
+m_c_implantdislocation_strC      <- m_prob_implantdislocation_strC * (m_c_implantdislocation_perevent +  n_treatment_implantdislocation * m_cost_transportleisure_surgery + n_ophthalmologistvisit_implantdislocation * m_cost_transportleisure_injectionmonitoring)
+m_cost_AE_strC                   <- m_c_conjunctivalbleb_strC + 
+                                    m_c_vitreoushemorrhage_strC + 
+                                    m_c_cataract_strC + 
+                                    m_c_conjunctivalerosion_strC + 
+                                    m_c_conjunctivalretraction_strC + 
+                                    m_c_endophthalmitis_strC + 
+                                    m_c_retinaldetachment_strC +
+                                    m_c_hyphema_strC +
+                                    m_c_implantdislocation_strC
+m_cost_AE_strC[n_cycles + 1, ]   <- 0 
+m_cost_AE_strC[, n_states]       <- 0 
+m_cost_AE_strC[, 6]              <- 0 
+print(m_cost_AE_strC)
+
+# Add the costs matrices to get the final cost matrix 
+m_c_strC                 <- m_cost_treatment_strC + m_cost_transportleisure_strC + m_cost_AE_strC + m_cost_BCVA6
+m_c_strC[n_cycles + 1, ] <- 0 
+m_c_strC[, n_states]     <- 0 
+print (m_c_strC)
+
+
+                                                    #######################
+################################################### State Rewards Utilities ################################################### 
+                                                    #######################
+
+################################# STRATEGY A ########################################
+# ---------------- State utility values ----------------
+### Use whole columns from excel
+# initialize a utility matrix with zeros
+m_u_state_strA <- matrix(0, nrow = n_cycles + 1, ncol = n_states)
+
+# Assuming u_BCVA1 is a vector with length equal to n_cycles+1
+# Fill the first column of m_u_state_strA with u_BCVA1
+m_u_state_strA[, 1] <- u_BCVA1
+m_u_state_strA[, 2] <- u_BCVA2
+m_u_state_strA[, 3] <- u_BCVA3
+m_u_state_strA[, 4] <- u_BCVA4
+m_u_state_strA[, 5] <- u_BCVA5
+m_u_state_strA[, 6] <- u_BCVA6
+m_u_state_strA[, 7] <- u_D
+print(m_u_state_strA)
+
+# ---------------- Disutility matrices treatment ----------------
+# Initialize a disutility matrix per injection
+m_disu_strA <- matrix(0, nrow = n_cycles + 1, ncol = n_states)
+# Fill the first column of m_disu_strA with IVDisu_BCVA1 (= disutility per injection)
+m_disu_strA[, 1] <-  IVDisu_BCVA1 * perc_patients_IVDisu
+m_disu_strA[1, 1] <- m_disu_strA[1, 1] * n_injections_strA_y1
+m_disu_strA[2, 1] <- m_disu_strA[2, 1] * n_injections_strA_y2
+for (i in 3:(n_cycles+1)) {
+  m_disu_strA[i, 1] <- m_disu_strA[i, 1] * n_injections_strA_y3
+}
+
+m_disu_strA[, 2] <- IVDisu_BCVA2 * perc_patients_IVDisu
+m_disu_strA[1, 2] <- m_disu_strA[1, 2] * n_injections_strA_y1
+m_disu_strA[2, 2] <- m_disu_strA[2, 2] * n_injections_strA_y2
+for (i in 3:(n_cycles+1)) {
+  m_disu_strA[i, 2] <- m_disu_strA[i, 2] * n_injections_strA_y3
+}
+
+m_disu_strA[, 3] <- IVDisu_BCVA3 * perc_patients_IVDisu
+m_disu_strA[1, 3] <- m_disu_strA[1, 3] * n_injections_strA_y1
+m_disu_strA[2, 3] <- m_disu_strA[2, 3] * n_injections_strA_y2
+for (i in 3:(n_cycles+1)) {
+  m_disu_strA[i, 3] <- m_disu_strA[i, 3] * n_injections_strA_y3
+}
+
+m_disu_strA[, 4] <- IVDisu_BCVA4 * perc_patients_IVDisu
+m_disu_strA[1, 4] <- m_disu_strA[1, 4] * n_injections_strA_y1
+m_disu_strA[2, 4] <- m_disu_strA[2, 4] * n_injections_strA_y2
+for (i in 3:(n_cycles+1)) {
+  m_disu_strA[i, 4] <- m_disu_strA[i, 4] * n_injections_strA_y3
+}
+
+m_disu_strA[, 5] <- IVDisu_BCVA5 * perc_patients_IVDisu
+m_disu_strA[1, 5] <- m_disu_strA[1, 5] * n_injections_strA_y1
+m_disu_strA[2, 5] <- m_disu_strA[2, 5] * n_injections_strA_y2
+for (i in 3:(n_cycles+1)) {
+  m_disu_strA[i, 5] <- m_disu_strA[i, 5] * n_injections_strA_y3 
+}
+
+m_disu_strA[, 6] <- IVDisu_BCVA6 * perc_patients_IVDisu
+m_disu_strA[1, 6] <- m_disu_strA[1, 6] * n_injections_strA_y1
+m_disu_strA[2, 6] <- m_disu_strA[2, 6] * n_injections_strA_y2
+for (i in 3:(n_cycles+1)) {
+  m_disu_strA[i, 6] <- m_disu_strA[i, 6] * n_injections_strA_y3
+}
+
+m_disu_strA[, 7] <- 0 # everyone is dead
+m_disu_strA[, 6] <- 0 # no treatment when blind
+print(m_disu_strA)
+
+
+# Multiply the AE probability and AE disutility per event matrices to get a matrix with AE disutility per cycle (should be multiplied with cohort trace still)
+m_disu_percycle_cataract_strA          <- m_prob_cataract_strA * m_disu_cataract
+m_disu_percycle_endophthalmitis_strA   <- m_prob_endophthalmitis_strA * m_disu_endophthalmitis
+m_disu_percycle_retinaldetachment_strA <- m_prob_retinaldetachment_strA * m_disu_retinaldetachment
+m_disu_percycle_retinaltear_strA       <- m_prob_retinaltear_strA * m_disu_retinaltear
+
+m_disuAE_strA <- m_disu_percycle_cataract_strA +
+                  m_disu_percycle_endophthalmitis_strA +
+                  m_disu_percycle_retinaldetachment_strA +
+                  m_disu_percycle_retinaltear_strA
+m_disuAE_strA[n_cycles + 1, ] <- 0 # override with zero's in last row when everyone is dead
+m_disuAE_strA[, n_states]     <- 0 # override with zero's in last column when everyone is dead
+m_disuAE_strA[, 6]            <- 0 # no treatment when blind
+print(m_disuAE_strA)
+
+# Add the utility and disutility matrices to get the final utility matrix 
+m_u_strA                 <- m_u_state_strA + m_disu_strA + m_disuAE_strA
+m_u_strA[n_cycles + 1, ] <- 0 # override with zero's in last row when everyone is dead
+m_u_strA[, n_states]     <- 0 # override with zero's in last column when everyone is dead
+print (m_u_strA)
+
+
+################################# STRATEGY B ########################################
+# ---------------- State utility values ----------------
+# initialize a utility matrix with zeros
+m_u_state_strB <- matrix(0, nrow = n_cycles+1, ncol = n_states)
+
+# Assuming u_BCVA1 is a vector with length equal to n_cycles+1
+# Fill the first column of m_u_state_strB with u_BCVA1
+m_u_state_strB[, 1] <- u_BCVA1
+m_u_state_strB[, 2] <- u_BCVA2
+m_u_state_strB[, 3] <- u_BCVA3
+m_u_state_strB[, 4] <- u_BCVA4
+m_u_state_strB[, 5] <- u_BCVA5
+m_u_state_strB[, 6] <- u_BCVA6
+m_u_state_strB[, 7] <- u_D
+print(m_u_state_strB)
+
+# ---------------- Disutility matrices treatment ----------------
+# Initialize a disutility matrix per injection
+m_disu_strB <- matrix(0, nrow = n_cycles + 1, ncol = n_states)
+# Fill the first column of m_disu_strB with IVDisu_BCVA1
+m_disu_strB[, 1] <- IVDisu_BCVA1 * perc_patients_IVDisu
+m_disu_strB[1, 1] <- m_disu_strB[1, 1] * n_injections_strB_y1
+m_disu_strB[2, 1] <- m_disu_strB[2, 1] * n_injections_strB_y2
+for (i in 3:(n_cycles+1)) {
+  m_disu_strB[i, 1] <- m_disu_strB[i, 1] * n_injections_strB_y3
+}
+
+m_disu_strB[, 2] <- IVDisu_BCVA2 * perc_patients_IVDisu
+m_disu_strB[1, 2] <- m_disu_strB[1, 2] * n_injections_strB_y1
+m_disu_strB[2, 2] <- m_disu_strB[2, 2] * n_injections_strB_y2
+for (i in 3:(n_cycles+1)) {
+  m_disu_strB[i, 2] <- m_disu_strB[i, 2] * n_injections_strB_y3
+}
+
+m_disu_strB[, 3] <- IVDisu_BCVA3 * perc_patients_IVDisu
+m_disu_strB[1, 3] <- m_disu_strB[1, 3] * n_injections_strB_y1
+m_disu_strB[2, 3] <- m_disu_strB[2, 3] * n_injections_strB_y2
+for (i in 3:(n_cycles+1)) {
+  m_disu_strB[i, 3] <- m_disu_strB[i, 3] * n_injections_strB_y3
+}
+
+m_disu_strB[, 4] <- IVDisu_BCVA4 * perc_patients_IVDisu
+m_disu_strB[1, 4] <- m_disu_strB[1, 4] * n_injections_strB_y1
+m_disu_strB[2, 4] <- m_disu_strB[2, 4] * n_injections_strB_y2
+for (i in 3:(n_cycles+1)) {
+  m_disu_strB[i, 4] <- m_disu_strB[i, 4] * n_injections_strB_y3
+}
+
+m_disu_strB[, 5] <- IVDisu_BCVA5 * perc_patients_IVDisu
+m_disu_strB[1, 5] <- m_disu_strB[1, 5] * n_injections_strB_y1
+m_disu_strB[2, 5] <- m_disu_strB[2, 5] * n_injections_strB_y2
+for (i in 3:(n_cycles+1)) {
+  m_disu_strB[i, 5] <- m_disu_strB[i, 5] * n_injections_strB_y3
+}
+
+m_disu_strB[, 6] <- IVDisu_BCVA6 * perc_patients_IVDisu
+m_disu_strB[1, 6] <- m_disu_strB[1, 6] * n_injections_strB_y1
+m_disu_strB[2, 6] <- m_disu_strB[2, 6] * n_injections_strB_y2
+for (i in 3:(n_cycles+1)) {
+  m_disu_strB[i, 6] <- m_disu_strB[i, 6] * n_injections_strB_y3
+}
+
+m_disu_strB[, 7] <- 0 # everyone is dead
+m_disu_strB[, 6] <- 0 # no treatment when blind
+print(m_disu_strB)
+
+# Multiply the AE probability and AE disutility per event matrices to get a matrix with AE disutility per cycle (should be multiplied with cohort trace still)
+m_disu_percycle_cataract_strB <- m_prob_cataract_strB * m_disu_cataract
+m_disu_percycle_endophthalmitis_strB <- m_prob_endophthalmitis_strB * m_disu_endophthalmitis
+m_disu_percycle_retinaldetachment_strB <- m_prob_retinaldetachment_strB * m_disu_retinaldetachment
+m_disu_percycle_retinaltear_strB <- m_prob_retinaltear_strB * m_disu_retinaltear
+
+m_disuAE_strB <- m_disu_percycle_cataract_strB +
+                  m_disu_percycle_endophthalmitis_strB +
+                  m_disu_percycle_retinaldetachment_strB +
+                  m_disu_percycle_retinaltear_strB
+m_disuAE_strB[n_cycles + 1, ] <- 0    # override with zero's in last row when everyone is dead
+m_disuAE_strB[, n_states]     <- 0    # override with zero's in last column when everyone is dead
+m_disuAE_strB[, 6]            <- 0    # no treatment when blind
+print(m_disuAE_strB)
+
+# Add the utility and disutility matrices to get the final utility matrix 
+m_u_strB                 <- m_u_state_strB + m_disu_strB + m_disuAE_strB
+m_u_strB[n_cycles + 1, ] <- 0 # override with zero's in last row when everyone is dead
+m_u_strB[, n_states]     <- 0 # override with zero's in last column when everyone is dead
+print (m_u_strB)
+
+
+################################# STRATEGY C ########################################
+# initialize a cost matrix with zeros
+m_u_state_strC <- matrix(0, nrow = n_cycles+1, ncol = n_states)
+
+# Assuming u_BCVA1 is a vector with length equal to n_cycles+1
+# Fill the first column of m_u_strC with u_BCVA1
+m_u_state_strC[, 1] <- u_BCVA1
+m_u_state_strC[, 2] <- u_BCVA2
+m_u_state_strC[, 3] <- u_BCVA3
+m_u_state_strC[, 4] <- u_BCVA4
+m_u_state_strC[, 5] <- u_BCVA5
+m_u_state_strC[, 6] <- u_BCVA6
+m_u_state_strC[, 7] <- u_D
+print(m_u_state_strC)
+
+# ---------------- Disutility matrices treatment ----------------
+# Initialize a disutility matrix per injection
+m_disu_strC <- matrix(0, nrow = n_cycles + 1, ncol = n_states)
+# Fill the first column of m_disu_strB with IVDisu_BCVA1
+m_disu_strC[, 1] <- IVDisu_BCVA1 * perc_patients_IVDisu
+m_disu_strC[1, 1] <- m_disu_strC[1, 1] * n_injections_strC_y1
+for (i in 2:(n_cycles+1)) {
+  m_disu_strC[i, 1] <- m_disu_strC[i, 1] * n_injections_strC_y2
+}
+
+m_disu_strC[, 2] <- IVDisu_BCVA2 * perc_patients_IVDisu
+m_disu_strC[1, 2] <- m_disu_strC[1, 2] * n_injections_strC_y1
+for (i in 1:(n_cycles+1)) {
+  m_disu_strC[i, 2] <- m_disu_strC[i, 2] * n_injections_strC_y2
+}
+
+m_disu_strC[, 3] <- IVDisu_BCVA3 * perc_patients_IVDisu
+m_disu_strC[1, 3] <- m_disu_strC[1, 3] * n_injections_strC_y1
+for (i in 2:(n_cycles+1)) {
+  m_disu_strC[i, 3] <- m_disu_strC[i, 3] * n_injections_strC_y2
+}
+
+m_disu_strC[, 4] <- IVDisu_BCVA4 * perc_patients_IVDisu
+m_disu_strC[1, 4] <- m_disu_strC[1, 4] * n_injections_strC_y1
+for (i in 2:(n_cycles+1)) {
+  m_disu_strC[i, 4] <- m_disu_strC[i, 4] * n_injections_strC_y2
+}
+
+m_disu_strC[, 5] <- IVDisu_BCVA5 * perc_patients_IVDisu
+m_disu_strC[1, 5] <- m_disu_strC[1, 5] * n_injections_strC_y1
+for (i in 2:(n_cycles+1)) {
+  m_disu_strC[i, 5] <- m_disu_strC[i, 5] * n_injections_strC_y2
+}
+
+m_disu_strC[, 6] <- IVDisu_BCVA6 * perc_patients_IVDisu
+m_disu_strC[1, 6] <- m_disu_strC[1, 6] * n_injections_strC_y1
+for (i in 2:(n_cycles+1)) {
+  m_disu_strC[i, 6] <- m_disu_strC[i, 6] * n_injections_strC_y2
+}
+
+m_disu_strC[1, -7] <- m_disu_strC[1, -7] + disu_PDS_insertion # one time disutility for the PDS insertion
+m_disu_strC[, 7]   <- 0 
+m_disu_strC[, 6]   <- 0 
+print(m_disu_strC)
+
+
+# Multiply the AE probability and AE disutility per event matrices to get a matrix with AE disutility per cycle (should be multiplied with cohort trace still)
+m_disu_percycle_conjunctivalbleb_strC   <- m_prob_conjunctivalbleb_strC * m_disu_conjunctivalbleb
+m_disu_percycle_vitreoushemorrhage_strC <- m_prob_vitreoushemorrhage_strC * m_disu_vitreoushemorrhage
+m_disu_percycle_cataract_strC           <- m_prob_cataract_strC * m_disu_cataract
+m_disu_percycle_conjunctivalerosion     <- m_prob_conjunctivalerosion_strC * m_disu_conjunctivalerosion
+m_disu_percycle_conjunctivalretraction  <- m_prob_conjunctivalretraction_strC * m_disu_conjunctivalretraction
+m_disu_percycle_endophthalmitis_strC    <- m_prob_endophthalmitis_strC * m_disu_endophthalmitis
+m_disu_percycle_retinaldetachment_strC  <- m_prob_retinaldetachment_strC * m_disu_retinaldetachment
+m_disu_percycle_hyphema_strC            <- m_prob_hyphema_strC * m_disu_hyphema
+m_disu_percycle_implantdislocation_strC <- m_prob_implantdislocation_strC * m_disu_implantdislocation
+  
+m_disuAE_strC <- m_disu_percycle_conjunctivalbleb_strC +
+                  m_disu_percycle_vitreoushemorrhage_strC +
+                  m_disu_percycle_cataract_strC +
+                  m_disu_percycle_conjunctivalerosion +
+                  m_disu_percycle_conjunctivalretraction +
+                  m_disu_percycle_endophthalmitis_strC +
+                  m_disu_percycle_retinaldetachment_strC +
+                  m_disu_percycle_hyphema_strC +
+                  m_disu_percycle_implantdislocation_strC
+m_disuAE_strC[n_cycles + 1, ] <- 0
+m_disuAE_strC[, n_states]     <- 0 
+m_disuAE_strC[, 6]            <- 0 
+print(m_disuAE_strC)
+
+# Add the utility and disutility matrices to get the final utility matrix 
+m_u_strC                 <- m_u_state_strC + m_disu_strC + m_disuAE_strC
+m_u_strC[n_cycles + 1, ] <- 0 # override with zero's in last row when everyone is dead
+m_u_strC[, n_states]     <- 0 # override with zero's in last column when everyone is dead
+print (m_u_strC)
+
+
+## Store state rewards ----
+#* Store the matrices of state utilities for each strategy in a list 
+l_u         <- list(A  = m_u_strA,
+                    B  = m_u_strB,
+                    C  = m_u_strC)
+l_u_state   <- list(A  = m_u_state_strA,
+                    B  = m_u_state_strB,
+                    C  = m_u_state_strC)
+l_u_disu    <- list(A  = m_disu_strA,
+                    B  = m_disu_strB,
+                    C  = m_disu_strC)
+l_u_disuAE  <- list(A  = m_disuAE_strA,
+                    B  = m_disuAE_strB,
+                    C  = m_disuAE_strC)
+#* Store the matrices of state cost for each strategy in a list 
+l_c                   <- list(A  = m_c_strA,
+                              B  = m_c_strB,
+                              C  = m_c_strC)
+l_c_BCVA6             <- list(A  = m_cost_BCVA6,
+                              B  = m_cost_BCVA6,
+                              C  = m_cost_BCVA6)
+l_c_treatment         <- list(A  = m_cost_treatment_strA,
+                              B  = m_cost_treatment_strB,
+                              C  = m_cost_treatment_strC)
+l_c_transportleisure  <- list(A  = m_cost_transportleisure_strA,
+                              B  = m_cost_transportleisure_strB,
+                              C  = m_cost_transportleisure_strC)
+l_c_AE                <- list(A  = m_cost_AE_strA,
+                              B  = m_cost_AE_strB,
+                              C  = m_cost_AE_strC)
+
+#* assign strategy names to matching items in the lists
+names(l_u)           <- names(l_c) <- v_names_str
+names(l_u_state)     <- names(l_u_disu) <- names(l_u_disuAE) <- v_names_str
+names(l_c_BCVA6) <- names(l_c_treatment) <- names(l_c_transportleisure) <- names(l_c_AE) <- v_names_str
+
+# Compute expected outcomes ----
+#* Create empty vectors to store total utilities and costs 
+v_tot_qaly <- v_tot_cost <- vector(mode = "numeric", length = n_str)
+names(v_tot_qaly) <- names(v_tot_cost) <- v_names_str
+
+v_tot_qaly_state <- v_tot_qaly_disu <- v_tot_qaly_disuAE <- vector(mode = "numeric", length = n_str)
+names(v_tot_qaly_state) <- names(v_tot_qaly_disu) <- names(v_tot_qaly_disuAE) <- v_names_str
+
+v_tot_cost_BCVA6 <- v_tot_cost_treatment <- v_tot_cost_transportleisure <- v_tot_cost_AE <- vector(mode = "numeric", length = n_str)
+names(v_tot_cost_BCVA6) <- names(v_tot_cost_treatment) <- names(v_tot_cost_transportleisure) <- names(v_tot_cost_AE) <- v_names_str
+
+# Initialize a list to store accumulated QALYs over time for each strategy
+accumulated_qalys <- vector("list", length = n_str)
+names(accumulated_qalys) <- v_names_str
+# Initialize a list to store accumulated life years over time for each strategy
+accumulated_life_years <- vector("list", length = n_str)
+names(accumulated_life_years) <- v_names_str
+# Initialize a vector to store total life years for each strategy
+v_tot_life_years <- numeric(n_str)
+
+
+## Loop through each strategy and calculate total utilities and costs ----
+for (i in 1:n_str) {
+  m_u_str <- l_u[[i]]   # select the vector of state utilities for the i-th strategy
+    m_u_str_state  <- l_u_state[[i]]
+    m_u_str_disu   <- l_u_disu[[i]]
+    m_u_str_disuAE <- l_u_disuAE[[i]]
+  m_c_str <- l_c[[i]]   # select the matrix of state costs for the i-th strategy
+    m_c_str_BCVA6            <- l_c_BCVA6[[i]]
+    m_c_str_treatment        <- l_c_treatment[[i]]
+    m_c_str_transportleisure <- l_c_transportleisure[[i]]
+    m_c_str_AE               <- l_c_AE[[i]]
+  ###* Expected QALYs and costs for all states per cycle
+  ##* QALYs = life years x QoL
+  #* Apply state rewards 
+  m_qaly_str <- l_m_M[[i]] * m_u_str # sum the utilities of all states for each cycle
+    m_qaly_str_state  <- l_m_M[[i]] * m_u_str_state
+    m_qaly_str_disu   <- l_m_M[[i]] * m_u_str_disu
+    m_qaly_str_disuAE <- l_m_M[[i]] * m_u_str_disuAE
+  m_cost_str <- l_m_M[[i]] * m_c_str # sum the costs of all states for each cycle
+    m_cost_BCVA6                <- l_m_M[[i]] * m_c_str_BCVA6
+    m_cost_str_treatment        <- l_m_M[[i]] * m_c_str_treatment
+    m_cost_str_transportleisure <- l_m_M[[i]] * m_c_str_transportleisure
+    m_cost_str_AE               <- l_m_M[[i]] * m_c_str_AE
+  ###* Expected QALYs and costs per cycle
+  ##* Vector of QALYs and costs
+  v_qaly_str <- apply(m_qaly_str, 1, sum) # sum the proportion of the cohort across transitions, 1 means summing of qalys per row/cycle. So in cycle 1 you have x qalys, in cycle 2 x qalys.. 
+    v_qaly_str_state  <- apply(m_qaly_str_state, 1, sum) 
+    v_qaly_str_disu   <- apply(m_qaly_str_disu, 1, sum) 
+    v_qaly_str_disuAE <- apply(m_qaly_str_disuAE, 1, sum) 
+  v_cost_str <- apply(m_cost_str, 1, sum) # sum the proportion of the cohort across transitions
+    v_cost_str_BCVA6            <- apply(m_cost_BCVA6, 1, sum)
+    v_cost_str_treatment        <- apply(m_cost_str_treatment, 1, sum)
+    v_cost_str_transportleisure <- apply(m_cost_str_transportleisure, 1, sum)
+    v_cost_str_AE               <- apply(m_cost_str_AE, 1, sum)
+  ###* Discounted total expected QALYs and Costs per strategy and apply within-cycle correction if applicable. 
+  ###* Matrix multiplication requires that the number of columns in the first matrix matches the number of rows in the second matrix. By transposing v_qaly_str, you ensure that it has the correct dimensions for matrix multiplication. The result will be a single value, representing the discounted total expected QALYs for the i-th strategy.
+  #* QALYs
+  v_tot_qaly[i] <- t(v_qaly_str) %*% (v_dwe * v_wcc)
+    v_tot_qaly_state[i]   <- t(v_qaly_str_state) %*% (v_dwe * v_wcc)
+    v_tot_qaly_disu[i]    <- t(v_qaly_str_disu) %*% (v_dwe * v_wcc)
+    v_tot_qaly_disuAE[i]  <- t(v_qaly_str_disuAE) %*% (v_dwe * v_wcc)
+  #* Costs
+  v_tot_cost[i] <- t(v_cost_str) %*% (v_dwc * v_wcc)
+    v_tot_cost_BCVA6[i] <- t(v_cost_str_BCVA6) %*% (v_dwc * v_wcc)
+    v_tot_cost_treatment[i] <- t(v_cost_str_treatment) %*% (v_dwc * v_wcc)
+    v_tot_cost_transportleisure[i] <- t(v_cost_str_transportleisure) %*% (v_dwc * v_wcc)
+    v_tot_cost_AE[i] <- t(v_cost_str_AE) %*% (v_dwc * v_wcc)
+
+  ## Initialize a vector to store accumulated QALYs over time for the current strategy
+  accumulated_qaly <- numeric(n_cycles + 1)
+  ## Loop through each time point and calculate the accumulated QALYs
+  for (t in 1:(n_cycles + 1)) {
+    accumulated_qaly[t] <- sum(v_qaly_str[1:t]) }
+  ## Store accumulated QALYs for the current strategy
+  accumulated_qalys[[i]] <- accumulated_qaly 
+  
+  ###* Expected life years for all states per cycle (unadjusted for QoL)
+  ##* Life years
+  #* Apply state rewards 
+  m_life_years_str <- l_m_M[[i]] # Since life years are not adjusted for QoL, you don't need to multiply by utilities
+  ###* Expected life years per cycle
+  ##* Vector of life years
+  # Exclude column 7 (health state 7)
+  m_life_years_str <- m_life_years_str[, -7]
+  v_life_years_str <- apply(m_life_years_str, 1, sum) # sum the proportion of the cohort across transitions
+  ###* Discounted total expected life years per strategy and apply within-cycle correction if applicable
+  #* Life years
+  v_tot_life_years[i] <- t(v_life_years_str) %*% (v_dwe * v_wcc)
+  ## Initialize a vector to store accumulated life years over time for the current strategy
+  accumulated_life_years_vec <- numeric(n_cycles + 1)
+  ## Loop through each time point and calculate the accumulated life years
+  for (t in 1:(n_cycles + 1)) {
+    accumulated_life_years_vec[t] <- sum(v_life_years_str[1:t])}
+  ## Store accumulated life years for the current strategy
+  accumulated_life_years[[i]] <- accumulated_life_years_vec 
+  
+}
+
+# Sum of QALYs and costs over time horizon for each strategy ----
+tot_qaly_strA <- v_tot_qaly[1]
+print(tot_qaly_strA)
+tot_qaly_strB <- v_tot_qaly[2]
+print(tot_qaly_strB)
+tot_qaly_strC <- v_tot_qaly[3]
+print(tot_qaly_strC)
+
+tot_cost_strA <- v_tot_cost[1]
+print(tot_cost_strA)
+tot_cost_strB <- v_tot_cost[2]
+print(tot_cost_strB)
+tot_cost_strC <- v_tot_cost[3]
+print(tot_cost_strC)
+
+icer_strC_vs_strA <- (tot_cost_strC - tot_cost_strA) / (tot_qaly_strC - tot_qaly_strA)
+icer_strC_vs_strA
+icer_strC_vs_strB <- (tot_cost_strC - tot_cost_strB) / (tot_qaly_strC - tot_qaly_strB)
+icer_strC_vs_strB
+
+print(v_tot_cost_BCVA6)
+print(v_tot_cost_treatment)
+print(v_tot_cost_transportleisure)
+print(v_tot_cost_AE)
+print(v_tot_qaly_state)
+print(v_tot_qaly_disu)
+print(v_tot_qaly_disuAE)
+
+# Plotting accumulated qalys ----
+print(accumulated_qalys)
+matplot(0:n_cycles, sapply(accumulated_qalys, function(x) x), type = "l", 
+        xlab = "Time", ylab = "Accumulated QALYs", 
+        main = "Accumulated QALYs over Time by Strategy", 
+        col = 1:n_str, lwd = 2,
+        legend.text = v_names_str, 
+        lty = 1)
+legend("topright", legend = v_names_str, col = 1:n_str, lwd = 2, lty = 1)
+
+# Plotting accumulated life years ----
+print(accumulated_life_years)
+matplot(0:n_cycles, sapply(accumulated_life_years, function(x) x), type = "l", 
+        xlab = "Time", ylab = "Accumulated Life Years", 
+        main = "Accumulated Life Years over Time by Strategy", 
+        col = 1:n_str, lwd = 2,
+        legend.text = v_names_str, 
+        lty = 1)
+legend("topright", legend = v_names_str, col = 1:n_str, lwd = 2, lty = 1)
+
+
+# Cost-effectiveness analysis (CEA) ----
+## Incremental cost-effectiveness ratios (ICERs) ----
+#* Function included in "R/Functions.R"; depends on the `dplyr` package
+#* The latest version can be found in `dampack` package
+df_cea <- calculate_icers(cost       = v_tot_cost, 
+                          effect     = v_tot_qaly,
+                          strategies = v_names_str)
+df_cea
+
+
+## CEA table in proper format ----
+table_cea <- format_table_cea(df_cea) # Function included in "R/Functions.R"; depends on the `scales` package
+table_cea
+
+## CEA frontier -----
+#* Function included in "R/Functions.R"; depends on the `ggplot2`  and `ggrepel` packages.
+#* The latest version can be found in `dampack` package
+plot(df_cea, label = "all", txtsize = 16) +
+  expand_limits(x = max(table_cea$QALYs) + 0.1) +
+  theme(legend.position = c(0.8, 0.2))
+
+
+
+
+
+
+
+                                                   ######
+################################################### PSA  ################################################### 
+                                                   ######
+#******************************************************************************#
+# Probabilistic Sensitivity Analysis (PSA) -----
+## Load model, CEA and PSA functions ----
+source('/Users/miessiekerman/Library/Mobile Documents/com~apple~CloudDocs/Documents/EU-HEM Thesis/R Studio/Scripts/Functions_PSA_57.2.R')
+source("/Users/miessiekerman/Library/Mobile Documents/com~apple~CloudDocs/Documents/EU-HEM Thesis/R Studio/Functions copy.R")
+
+## List of input parameters -----
+l_params_all <- list(
+  # Model input ----
+  ## General setup ----
+  cycle_length = 1,       
+  n_age_init = 75,       
+  n_age_max  = 107,       
+  ### Discounting factors ----
+  d_c = 0.04,
+  d_e = 0.04, 
+  ### Number of injections per year ---- 8.8 7.3 4.4  .. 8.9 9.2 5.5
+  n_injections_strA_y1 = n_injections_strA_y1, 
+  n_injections_strA_y2 = n_injections_strA_y2, 
+  n_injections_strA_y3 = n_injections_strA_y3, 
+  n_injections_strB_y1 = n_injections_strB_y1, 
+  n_injections_strB_y2 = n_injections_strB_y2, 
+  n_injections_strB_y3 = n_injections_strB_y3, 
+  n_injections_strC_y1 = 1,   # number of injections for strategy C in year 1
+  n_injections_strC_y2 = 2,   # number of injections for strategy C in year 2+
+  ### Scenario analyses
+  rr_AEprobabilities_TREX = 1,
+  perc_patients_IVDisu = 0.5,
+  ### Transition rates (annual), and hazard ratios (HRs) ----
+  r_BCVA12dis = 0,     # constant annual rate 
+  r_BCVA13dis = 0,     # constant annual rate 
+  r_BCVA14dis = 0,     # constant annual rate 
+  r_BCVA15dis = 0,     # constant annual rate 
+  r_BCVA16dis = 0,     # constant annual rate 
+  r_BCVA21dis = 0,     # constant annual rate 
+  r_BCVA23dis = 0,     # constant annual rate 
+  r_BCVA24dis = 0,     # constant annual rate 
+  r_BCVA25dis = 0,     # constant annual rate 
+  r_BCVA26dis = 0,     # constant annual rate 
+  r_BCVA31dis = 0,     # constant annual rate 
+  r_BCVA32dis = 0,     # constant annual rate 
+  r_BCVA34dis = 0,     # constant annual rate 
+  r_BCVA35dis = 0,     # constant annual rate 
+  r_BCVA36dis = 0,     # constant annual rate 
+  r_BCVA41dis = 0,     # constant annual rate 
+  r_BCVA42dis = 0,     # constant annual rate 
+  r_BCVA43dis = 0,     # constant annual rate 
+  r_BCVA45dis = 0,     # constant annual rate 
+  r_BCVA46dis = 0,     # constant annual rate
+  r_BCVA51dis = 0,     # constant annual rate 
+  r_BCVA52dis = 0,     # constant annual rate 
+  r_BCVA53dis = 0,     # constant annual rate 
+  r_BCVA54dis = 0,     # constant annual rate 
+  r_BCVA56dis = 0,     # constant annual rate 
+  r_BCVA61dis = 0,     # constant annual rate 
+  r_BCVA62dis = 0,     # constant annual rate 
+  r_BCVA63dis = 0,     # constant annual rate 
+  r_BCVA64dis = 0,     # constant annual rate 
+  r_BCVA65dis = 0,     # constant annual rate 
+  hr_BCVA1D = 1.13,    # hazard ratio of death for stage 1 versus stage 1 
+  hr_BCVA2D = 1.13,    # hazard ratio of death for stage 2 versus stage 1 
+  hr_BCVA3D = 1.13,    # hazard ratio of death for stage 3 versus stage 1 
+  hr_BCVA4D = 1.13,    # hazard ratio of death for VA <55 in either eye
+  hr_BCVA5D = 1.13,    # hazard ratio of death for VA <55 in either eye
+  hr_BCVA6D = 1.28,    # hazard ratio of death for VA <55 in either eye
+  ## Age-dependent mortality rates ----
+  v_r_mort_by_age = v_r_mort_by_age,
+  ### State rewards ----
+  #### Costs ----
+  # Costs PDS
+  n_PDS_surgery = 1,
+  c_PDS_surgery = 15517.656,
+  c_PDS_drug = 25242.42,
+  c_PDS_refill_procedure = 3552.864,
+  n_PDS_monitoring_Y1 = 3,
+  n_PDS_monitoring_Y2 = 0,
+  c_monitoring_procedure = 1515.192,
+  # Costs aflibercept/bevacizumab
+  c_IVinjection_procedure = 3552.864,
+  c_production_syringe = 400,
+  c_afli_drugpervial = 8139.92,
+  n_afli_injectionspervial = 2.5,
+  c_beva_drugpervial = 2879.04,
+  n_beva_injectionspervial = 20,
+  # Costs transport/leisure time
+  c_transporthospital_pertrip = 794,
+  n_transport_pervisit = 2,
+  n_hours_lostleisuretime_injectionmonitoring = 5,
+  n_hours_lostleisuretime_surgery = 7,
+  c_lostleisuretime_perhour = 310.4264,
+  p_peopleneedingaccompany = 0.38,
+  # Costs adverse events 
+  c_ophthalmologistvisit = 1515.192,
+  n_ophthalmologistvisit_conjunctivalbleb = 2,
+  n_treatment_vitreoushemorrhage = 1,
+  c_treatment_vitreoushemorrhage = 45508.008,
+  n_ophthalmologistvisit_vitreoushemorrhage = 5,
+  n_treatment_cataract = 1,
+  c_treatment_cataract = 12591.768,
+  n_ophthalmologistvisit_cataract = 2,
+  n_ophthalmologistvisit_conjunctivalerosion = 2,
+  n_treatment_conjunctivalretraction = 1,
+  c_treatment_conjunctivalretraction = 15517.656,
+  n_ophthalmologistvisit_conjunctivalretraction = 2,
+  n_endophthalmitis_parsplanavitrectomy = 1,
+  c_endophthalmitis_parsplanavitrectomy = 67765.656,
+  c_endophthalmitis_vancomycin = 87.99,
+  c_endophthalmitis_ceftazidim = 29.75,
+  c_endophthalmitis_antibiotics = 3552.864,
+  n_ophthalmologistvisit_endophthalmitis = 5,
+  n_treatment_retinaldetachment = 1,
+  c_treatment_retinaldetachment = 27952.68,
+  n_ophthalmologistvisit_retinaldetachment = 2,
+  n_treatment_hyphema = 1,
+  c_treatment_hyphema = 15517.656,
+  n_ophthalmologistvisit_hyphema = 2,
+  n_treatment_implantdislocation = 1,
+  c_treatment_implantdislocation = 15517.656,
+  n_ophthalmologistvisit_implantdislocation = 2,
+  n_treatment_retinaltear = 1,
+  c_treatment_retinaltear = 27952.68,
+  n_ophthalmologistvisit_retinaltear = 2,
+  # Costs per health state
+  c_BCVA1 = 0,                  # annual cost of being in state 1
+  c_BCVA2 = 0,                  # annual cost of being in state 2
+  c_BCVA3 = 0,                  # annual cost of being in state 3
+  c_BCVA4 = 0,                  # annual cost of being in state 4
+  c_BCVA5 = 0,                  # annual cost of being in state 5           # annual cost of being in state 5
+  c_BCVA6 = 95753.40,      # annual cost of being in state 6
+  c_D = 0,                  # annual cost of being dead
+  #### Utilities ---- Utility values based on the BSE calculated by NICE based on Brown et al. (2000), without age-dependency
+  utilitytable_agedependent = utilitytable_agedependent,
+  u_D = 0,
+  #### PDS insertion disutilities (disutilities per injection) ----
+  disu_PDS_insertion_year = -0.13, # disutility of PDS insertion per year (only in year 1)
+  dur_PDS_insertion = 2/52,   # event duration PDS insertion in years
+  #### Injection disutilities (disutilities per injection) ---- 
+  IVDisutilitytable_agedependent = IVDisutilitytable_agedependent,
+  IVDisu_D         = 0,                       # disutility per injection when dead
+  #### Adverse events disutilities ----
+  disu_conjunctivalbleb_year = 0.13,  # Annual disutility conjunctival bleb
+  disu_vitreoushemorrhage_year = 0.15,  # Annual disutility vitreous hemorrhage
+  disu_cataract_year = 0.142, # Annual disutility cataract
+  disu_conjunctivalerosion_year = 0.13,  # Annual disutility conjunctival erosion
+  disu_conjunctivalretraction_year = 0.13,  # Annual disutility conjunctival retraction
+  disu_endophthalmitis_year = 0.3,   # Annual disutility endophthalmitis
+  disu_retinaldetachment_year = 0.27,  # Annual disutility (Rhegmatogenous) retinal detachment
+  disu_hyphema_year = 0.15,  # Annual disutility hyphema
+  disu_implantdislocation_year = 0.13,  # Annual disutility implant dislocation
+  disu_retinaltear_year = 0,      # Annual disutility retinal tear
+  #### Adverse events durations ----
+  dur_conjunctivalbleb = 2/52,                       # Duration conjunctival bleb
+  dur_vitreoushemorrhage = 26/52,                      # Duration vitreous hemorrhage
+  dur_cataract = 4/52,                       # Duration cataract
+  dur_conjunctivalerosion = 1/52,                       # Duration conjunctival erosion
+  dur_conjunctivalretraction = 2/52,                       # Duration conjunctival retraction
+  dur_endophthalmitis = 0.2*(52/52) + 0.8*(6/52),   # Duration endophthalmitis
+  dur_retinaldetachment = 3/52,                      # Duration (Rhegmatogenous) retinal detachment
+  dur_hyphema = 4/52,                       # Duration hyphema
+  dur_implantdislocation = 2/52,                       # Duration implant dislocation
+  dur_retinaltear = 0,                          # Duration retinal tear
+  #### Adverse events probabilities and calculations ----
+  p_conjunctivalbleb_PDS_month1 = 0.044,             # Probability conjunctival bleb PDS <37 days
+  p_vitreoushemorrhage_PDS_month1 = 0.048,             # Probability vitreous hemorrhage PDS <37 days
+  p_cataract_PDS_month1 = 0.004,             # Probability cataract PDS <37 days 
+  p_conjunctivalerosion_PDS_month1 = 0.004,             # Probability conjunctival erosion PDS <37 days
+  p_conjunctivalretraction_PDS_month1 = 0.004,             # Probability conjunctival retraction PDS <37 days
+  p_endophthalmitis_PDS_month1 = 0,                 # Probability endophthalmitis PDS <37 days
+  p_retinaldetachment_PDS_month1 = 0.004,             # Probability retinal detachment PDS <37 days
+  p_hyphema_PDS_month1 = 0.004,             # Probability hyphema PDS <37 days
+  p_implantdislocation_PDS_month1 = 0,                 # Probability implant dislocation PDS <37 days
+  p_conjunctivalbleb_PDS_month2 = 0.028,             # Probability conjunctival bleb PDS >37 days
+  p_vitreoushemorrhage_PDS_month2 = 0.012,             # Probability vitreous hemorrhage PDS <>7 days
+  p_cataract_PDS_month2 = 0.089,             # Probability cataract PDS >37 days 
+  p_conjunctivalerosion_PDS_month2 = 0.036,             # Probability conjunctival erosion PDS >37 days 
+  p_conjunctivalretraction_PDS_month2 = 0.002,             # Probability conjunctival retraction PDS >37 days
+  p_endophthalmitis_PDS_month2 = 0.016,             # Probability endophthalmitis PDS >37 days
+  p_retinaldetachment_PDS_month2 = 0.04,              # Probability retinal detachment PDS >37 days
+  p_hyphema_PDS_month2 = 0,                 # Probability hyphema PDS >37 days
+  p_implantdislocation_PDS_month2 = 0.016,             # Probability implant dislocation PDS >37 days
+  p_cataract_IV = 0.0016,              # Annual probability cataract IV
+  p_endophthalmitis_IV = 0.0047,              # Annual probability endophtalmitis IV
+  p_retinaldetachment_IV = 0.0008,              # Annual probability retinal detachment IV
+  p_retinaltear_IV = 0.0033,              # Annual probability retinal tear IV
+  # Process model inputs ----
+  p_discontinue = 0,
+  # Transition probabilities from Ferrante et al. (2022) year 1
+  p_BCVA12y1 = 0.12,
+  p_BCVA13y1 = 0.01,
+  p_BCVA14y1 = 0,
+  p_BCVA15y1 = 0,
+  p_BCVA16y1 = 0,
+  p_BCVA21y1 = 0.49,
+  p_BCVA23y1 = 0.12,
+  p_BCVA24y1 = 0.01,
+  p_BCVA25y1 = 0,
+  p_BCVA26y1 = 0,
+  p_BCVA31y1 = 0.13,
+  p_BCVA32y1 = 0.36,
+  p_BCVA34y1 = 0.13,
+  p_BCVA35y1 = 0.01,
+  p_BCVA36y1 = 0,
+  p_BCVA41y1 = 0,
+  p_BCVA42y1 = 0.18,
+  p_BCVA43y1 = 0.41,
+  p_BCVA45y1 = 0.12,
+  p_BCVA46y1 = 0.01, 
+  p_BCVA51y1 = 0,
+  p_BCVA52y1 = 0,
+  p_BCVA53y1 = 0,
+  p_BCVA54y1 = 0.45,
+  p_BCVA56y1 = 0.07,
+  p_BCVA61y1 = 0,
+  p_BCVA62y1 = 0,
+  p_BCVA63y1 = 0,
+  p_BCVA64y1 = 0.22,
+  p_BCVA65y1 = 0.33,
+  #year 2
+  p_BCVA12y2 = 0.22,
+  p_BCVA13y2 = 0,
+  p_BCVA14y2 = 0,
+  p_BCVA15y2 = 0,
+  p_BCVA16y2 = 0,
+  p_BCVA21y2 = 0.14,
+  p_BCVA23y2 = 0.22,
+  p_BCVA24y2 = 0,
+  p_BCVA25y2 = 0,
+  p_BCVA26y2 = 0,
+  p_BCVA31y2 = 0,
+  p_BCVA32y2 = 0.14,
+  p_BCVA34y2 = 0.22,
+  p_BCVA35y2 = 0,
+  p_BCVA36y2 = 0,
+  p_BCVA41y2 = 0,
+  p_BCVA42y2 = 0,
+  p_BCVA43y2 = 0.14,
+  p_BCVA45y2 = 0.22,
+  p_BCVA46y2 = 0,  
+  p_BCVA51y2 = 0,
+  p_BCVA52y2 = 0,
+  p_BCVA53y2 = 0,
+  p_BCVA54y2 = 0.14,
+  p_BCVA56y2 = 0.22,
+  p_BCVA61y2 = 0,
+  p_BCVA62y2 = 0,
+  p_BCVA63y2 = 0,
+  p_BCVA64y2 = 0,
+  p_BCVA65y2 = 0.14
+)
+
+
+#* Store the parameter names into a vector
+v_names_params <- names(l_params_all)
+
+## Test functions to generate CE outcomes and PSA dataset ----
+#* Test function to compute CE outcomes
+calculate_ce_out(l_params_all) # Function included in "R/Functions_cSTM_time_indep.R"
+
+#* Test function to generate PSA input dataset
+generate_psa_params(10) # Function included in "R/Functions_cSTM_time_indep.R"
+
+## Generate PSA dataset ----
+#* Number of simulations
+n_sim <- 1000
+
+#* Generate PSA input dataset
+df_psa_input <- generate_psa_params(n_sim = n_sim)
+#* First six observations
+head(df_psa_input)
+#* Check whether mean of all generates values = deterministic input  
+colMeans(df_psa_input)
+
+### Histogram of PSA dataset ----
+ggplot(melt(df_psa_input, variable.name = "Parameter"), 
+       aes(x = value)) +
+  facet_wrap(~Parameter, scales = "free") +
+  geom_histogram(aes(y = ..density..)) +
+  scale_x_continuous(breaks = number_ticks(4)) + 
+  ylab("") +
+  theme_bw(base_size = 4) + 
+  theme(axis.text = element_text(size = 6),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y  = element_blank(),
+        axis.ticks.y = element_blank())
+
+## Run PSA ----
+#* Initialize data.frames with PSA output 
+#* data.frame of costs
+df_c <- as.data.frame(matrix(0, 
+                             nrow = n_sim,
+                             ncol = n_str))
+    colnames(df_c) <- v_names_str
+df_c_BCVA6 <- as.data.frame(matrix(0, 
+                                 nrow = n_sim,
+                                 ncol = n_str))
+    colnames(df_c_BCVA6) <- v_names_str
+df_c_treatment <- as.data.frame(matrix(0, 
+                             nrow = n_sim,
+                             ncol = n_str))
+    colnames(df_c_treatment) <- v_names_str
+df_c_transportleisure <- as.data.frame(matrix(0, 
+                             nrow = n_sim,
+                             ncol = n_str))
+    colnames(df_c_transportleisure) <- v_names_str
+df_c_AE <- as.data.frame(matrix(0, 
+                             nrow = n_sim,
+                             ncol = n_str))
+    colnames(df_c_AE) <- v_names_str
+df_c_AE_TL <- as.data.frame(matrix(0, 
+                                    nrow = n_sim,
+                                    ncol = n_str))
+    colnames(df_c_AE_TL) <- v_names_str
+#* data.frame of effectiveness
+df_e <- as.data.frame(matrix(0, 
+                             nrow = n_sim,
+                             ncol = n_str))
+colnames(df_e) <- v_names_str
+df_e_state <- as.data.frame(matrix(0, 
+                             nrow = n_sim,
+                             ncol = n_str))
+    colnames(df_e_state) <- v_names_str
+df_e_disu <- as.data.frame(matrix(0, 
+                             nrow = n_sim,
+                             ncol = n_str))
+    colnames(df_e_disu) <- v_names_str
+df_e_disuAE <- as.data.frame(matrix(0, 
+                             nrow = n_sim,
+                             ncol = n_str))
+    colnames(df_e_disuAE) <- v_names_str
+
+
+#* Conduct probabilistic sensitivity analysis
+#* Run Markov model on each parameter set of PSA input dataset
+n_time_init_psa_series <- Sys.time()
+for (i in 1:n_sim) { # i <- 1
+  l_psa_input <- update_param_list(l_params_all, df_psa_input[i,])
+  # Economics Measures
+  l_out_ce_temp  <- calculate_ce_out(l_psa_input)
+  df_c[i, ]  <- l_out_ce_temp$Cost  
+  df_e[i, ]  <- l_out_ce_temp$Effect
+  
+  df_c_BCVA6[i, ]             <- l_out_ce_temp$Cost_BCVA6
+  df_c_treatment[i, ]         <- l_out_ce_temp$Cost_treatment
+  df_c_transportleisure[i, ]  <- l_out_ce_temp$Cost_transportleisure
+  df_c_AE[i, ]                <- l_out_ce_temp$Cost_AE
+  df_c_AE_TL[i, ]             <- l_out_ce_temp$Cost_AE_TL
+  df_e_state[i, ]             <- l_out_ce_temp$Effect_state
+  df_e_disu[i, ]              <- l_out_ce_temp$Effect_disu
+  df_e_disuAE[i, ]            <- l_out_ce_temp$Effect_disuAE
+  
+  # Display simulation progress
+  if (i/(n_sim/100) == round(i/(n_sim/100), 0)) { # display progress every 5%
+    cat('\r', paste(i/n_sim * 100, "% done", sep = " "))
+  }
+}
+n_time_end_psa_series <- Sys.time()
+n_time_total_psa_series <- n_time_end_psa_series - n_time_init_psa_series
+print(paste0("PSA with ", scales::comma(n_sim), " simulations run in series in ", 
+             round(n_time_total_psa_series, 2), " ", 
+             units(n_time_total_psa_series)))
+View(df_e)
+View(df_c)
+View(df_c_BCVA6)
+View(df_c_treatment)
+View(df_c_transportleisure)
+View(df_c_AE)
+View(df_c_AE_TL)
+View(df_e_state)
+View(df_e_disu)
+View(df_e_disuAE)
+
+## Visualize PSA results and CEA ----
+### Create PSA object ----
+#* Function included in "R/Functions.R" The latest version can be found in `dampack` package
+l_psa <- make_psa_obj(cost          = df_c, 
+                      effectiveness = df_e, 
+                      parameters    = df_psa_input, 
+                      strategies    = v_names_str,
+                      currency = "NOK")
+l_psa$strategies <- v_names_str
+colnames(l_psa$effectiveness)<- v_names_str
+colnames(l_psa$cost)<- v_names_str
+
+View(l_psa)
+l_psa$effectiveness #Show total QALYs per simulation (take mean to get probabilistic total QALYs)
+l_psa$cost #Show total costs per simulation (take mean to get probabilistic total costs)
+
+# Disaggregated total costs/effects over all cycles
+total_cost_treatment_psa        <- colMeans(df_c_treatment)
+total_cost_treatment_psa
+total_cost_BCVA6_psa            <- colMeans(df_c_BCVA6)
+total_cost_BCVA6_psa
+total_cost_transportleisure_psa <- colMeans(df_c_transportleisure)
+total_cost_transportleisure_psa
+total_cost_AE_psa               <- colMeans(df_c_AE)
+total_cost_AE_psa
+total_cost_AE_TL_psa            <- colMeans(df_c_AE_TL)
+total_cost_AE_TL_psa
+total_qalys_state_psa           <- colMeans(df_e_state)
+total_qalys_state_psa
+total_qalys_disu_psa            <- colMeans(df_e_disu)
+total_qalys_disu_psa
+total_qalys_disuAE_psa          <- colMeans(df_e_disuAE)
+total_qalys_disuAE_psa
+
+# Total costs/qalys over all cycles and ICERS
+total_qaly_psa <- colMeans(l_psa$effectiveness)
+total_qaly_psa
+tot_qaly_strA_psa <- total_qaly_psa[1]
+print(tot_qaly_strA_psa)
+tot_qaly_strB_psa <- total_qaly_psa[2]
+print(tot_qaly_strB_psa)
+tot_qaly_strC_psa <- total_qaly_psa[3]
+print(tot_qaly_strC_psa)
+
+total_cost_psa <- colMeans(l_psa$cost)
+total_cost_psa
+tot_cost_strA_psa <- total_cost_psa[1]
+print(tot_cost_strA_psa)
+tot_cost_strB_psa <- total_cost_psa[2]
+print(tot_qaly_strB_psa)
+tot_cost_strC_psa <- total_cost_psa[3]
+print(tot_cost_strC_psa)
+
+# Incremental costs and ICERs
+inccost_strC_vs_strA_psa  <- tot_cost_strC_psa - tot_cost_strA_psa
+inccost_strC_vs_strA_psa
+inccost_strC_vs_strB_psa  <- tot_cost_strC_psa - tot_cost_strB_psa
+inccost_strC_vs_strB_psa
+inc_qaly_strC_vs_strA_psa <- tot_qaly_strC_psa - tot_qaly_strA_psa
+inc_qaly_strC_vs_strA_psa
+inc_qaly_strC_vs_strB_psa <- tot_qaly_strC_psa - tot_qaly_strB_psa
+inc_qaly_strC_vs_strB_psa
+  
+icer_strC_vs_strA_psa <- (tot_cost_strC_psa - tot_cost_strA_psa) / (tot_qaly_strC_psa - tot_qaly_strA_psa)
+icer_strC_vs_strA_psa
+icer_strC_vs_strB_psa <- (tot_cost_strC_psa - tot_cost_strB_psa) / (tot_qaly_strC_psa - tot_qaly_strB_psa)
+icer_strC_vs_strB_psa
+
+
+### EXPORT RESULTS FOR TABLES
+# Combine results into a data frame for the first sheet
+results_sheet1 <- data.frame(
+  Metric = rep(c("total_cost_treatment_psa", "total_cost_BCVA6_psa", "total_cost_transportleisure_psa",
+                 "total_cost_AE_psa", "total_cost_AE_TL_psa", "total_qalys_state_psa", 
+                 "total_qalys_disu_psa", "total_qalys_disuAE_psa", "total_qaly_psa", 
+                 "total_cost_psa"), each = length(total_cost_treatment_psa)),
+  Cycle = rep(1:length(total_cost_treatment_psa), 10),
+  Value = c(total_cost_treatment_psa, total_cost_BCVA6_psa, total_cost_transportleisure_psa,
+            total_cost_AE_psa, total_cost_AE_TL_psa, total_qalys_state_psa, 
+            total_qalys_disu_psa, total_qalys_disuAE_psa, total_qaly_psa, 
+            total_cost_psa)
+)
+
+# Combine results into a data frame for the second sheet
+results_sheet2 <- data.frame(
+  Metric = c("tot_qaly_strA_psa", "tot_qaly_strB_psa", "tot_qaly_strC_psa",
+             "tot_cost_strA_psa", "tot_cost_strB_psa", "tot_cost_strC_psa",
+             "inccost_strC_vs_strA_psa", "inccost_strC_vs_strB_psa", 
+             "inc_qaly_strC_vs_strA_psa", "inc_qaly_strC_vs_strB_psa",
+             "icer_strC_vs_strA_psa", "icer_strC_vs_strB_psa"),
+  Value = c(tot_qaly_strA_psa, tot_qaly_strB_psa, tot_qaly_strC_psa,
+            tot_cost_strA_psa, tot_cost_strB_psa, tot_cost_strC_psa,
+            inccost_strC_vs_strA_psa, inccost_strC_vs_strB_psa, 
+            inc_qaly_strC_vs_strA_psa, inc_qaly_strC_vs_strB_psa,
+            icer_strC_vs_strA_psa, icer_strC_vs_strB_psa)
+)
+
+# Create a new workbook and add the sheets
+wb <- createWorkbook()
+addWorksheet(wb, "Detailed Results")
+addWorksheet(wb, "Summary Results")
+
+# Write the data frames to the sheets
+writeData(wb, sheet = "Detailed Results", results_sheet1)
+writeData(wb, sheet = "Summary Results", results_sheet2)
+
+# Save the workbook to a file
+saveWorkbook(wb, "PSA outcomes 57.2.xlsx", overwrite = TRUE)
+
+
+
+
+# NMB calculations
+wtp <- 275000
+nmb_strC_vs_strA_psa <- (tot_qaly_strC_psa - tot_qaly_strA_psa) * wtp - (tot_cost_strC_psa - tot_cost_strA_psa)
+nmb_strC_vs_strA_psa
+
+nmb_strC_vs_strB_psa <- (tot_qaly_strC_psa - tot_qaly_strB_psa) * wtp - (tot_cost_strC_psa - tot_cost_strB_psa)
+nmb_strC_vs_strB_psa
+
+#* Vector with willingness-to-pay (WTP) thresholds.
+v_wtp <- seq(0, 1000000, by = 10000)
+
+
+
+### Cost-Effectiveness Scatter plot ----
+#* Function included in "R/Functions.R"; depends on `tidyr` and `ellipse` packages.
+#* The latest version can be found in `dampack` package
+plot.psa(l_psa) +
+  ggthemes::scale_color_colorblind() +
+  ggthemes::scale_fill_colorblind() +
+  xlab("Effectiveness (QALYs)") +
+  guides(col = guide_legend(nrow = 2)) +
+  theme(legend.position = "bottom")
+
+
+### Incremental Cost-Effectiveness Scatter plot VS AFLIBERCEPT ----
+l_psa_incrementalCEplot_PDSafli <- make_psa_obj(cost          = (df_c['PDS (C)']- df_c['Aflibercept TREX (A)']), 
+                                                          effectiveness = (df_e['PDS (C)']- df_e['Aflibercept TREX (A)']), 
+                                                          parameters    = df_psa_input, 
+                                                          strategies    = "PDS versus aflibercept",
+                                                          currency = "NOK")
+View(l_psa_incrementalCEplot_PDSafli)
+plot.psa(l_psa_incrementalCEplot_PDSafli) +
+  ggthemes::scale_color_colorblind() +
+  ggthemes::scale_fill_colorblind() +
+  xlab("Incremental effectiveness (QALYs)") +
+  ylab("Incremental Costs (NOK)") +
+  guides(col = guide_legend(nrow = 2)) +
+  theme(legend.position = "bottom")
+
+### Incremental Cost-Effectiveness Scatter plot VS BEVACIZUMAB ----
+l_psa_incrementalCEplot_PDSbeva <- make_psa_obj(cost          = (df_c['PDS (C)']- df_c['Bevacizumab TREX (B)']), 
+                                        effectiveness = (df_e['PDS (C)']- df_e['Bevacizumab TREX (B)']), 
+                                        parameters    = df_psa_input, 
+                                        strategies    = "PDS versus bevacizumab",
+                                        currency = "NOK")
+View(l_psa_incrementalCEplot_PDSbeva)
+plot.psa(l_psa_incrementalCEplot_PDSbeva) +
+  ggthemes::scale_color_colorblind() +
+  ggthemes::scale_fill_colorblind() +
+  xlab("Incremental effectiveness (QALYs)") +
+  ylab("Incremental Costs (NOK)") +
+  guides(col = guide_legend(nrow = 2)) +
+  theme(legend.position = "bottom")
+
+
+### Incremental cost-effectiveness ratios (ICERs) with probabilistic output ----
+#* Compute expected costs and effects for each strategy from the PSA
+#* Function included in "R/Functions.R". The latest version can be found in `dampack` package
+df_out_ce_psa <- summary.psa(l_psa)
+df_out_ce_psa # Probabilistic mean costs etc.
+
+#* Function included in "R/Functions.R"; depends on the `dplyr` package
+#* The latest version can be found in `dampack` package
+df_cea_psa <- calculate_icers(cost       = df_out_ce_psa$meanCost, 
+                              effect     = df_out_ce_psa$meanEffect,
+                              strategies = df_out_ce_psa$Strategy)
+df_cea_psa
+
+### Plot cost-effectiveness frontier with probabilistic output ----
+#* Function included in "R/Functions.R"; depends on the `ggplot2`  and `ggrepel` packages.
+#* The latest version can be found in `dampack` package
+plot.icers(df_cea_psa)
+
+## Cost-effectiveness acceptability curves (CEACs) and frontier (CEAF) ---
+#* Functions included in "R/Functions.R". The latest versions can be found in `dampack` package
+ceac_obj <- ceac(wtp = v_wtp, psa = l_psa)
+#* Regions of highest probability of cost-effectiveness for each strategy
+summary.ceac(ceac_obj)
+#* CEAC & CEAF plot
+plot.ceac(ceac_obj) +
+  ggthemes::scale_color_colorblind() +
+  ggthemes::scale_fill_colorblind() +
+  theme(legend.position = c(0.82, 0.5))
+
+#* CEAC & CEAF plot PDS vs AFLI
+l_psa_CEAC_PDSafli <- make_psa_obj(cost          = df_c[, c(1, 3)], 
+                                    effectiveness = df_e[, c(1, 3)], 
+                                    parameters    = df_psa_input, 
+                                    strategies    = c('Aflibercept TREX (A)', 'PDS (C)'),
+                                    currency = "NOK")
+ceac_obj_PDSafli <- ceac(wtp = v_wtp, psa = l_psa_CEAC_PDSafli)
+summary.ceac(ceac_obj_PDSafli)
+plot.ceac(ceac_obj_PDSafli) +
+  ggthemes::scale_color_colorblind() +
+  ggthemes::scale_fill_colorblind() +
+  theme(legend.position = c(0.82, 0.5)) +
+  ggtitle("Cost-effectiveness Acceptability Curve & Frontier Plot aflibercept vs PDS")
+
+#* CEAC & CEAF plot PDS vs BEVA
+l_psa_CEAC_PDSbeva <- make_psa_obj(cost          = df_c[, c(2, 3)], 
+                                   effectiveness = df_e[, c(2, 3)], 
+                                   parameters    = df_psa_input, 
+                                   strategies    = c('Bevacizumab TREX (A)', 'PDS (C)'),
+                                   currency = "NOK")
+ceac_obj_PDSbeva <- ceac(wtp = v_wtp, psa = l_psa_CEAC_PDSbeva)
+summary.ceac(ceac_obj_PDSbeva)
+plot.ceac(ceac_obj_PDSbeva) +
+  ggthemes::scale_color_colorblind() +
+  ggthemes::scale_fill_colorblind() +
+  theme(legend.position = c(0.82, 0.5)) +
+  ggtitle("Cost-effectiveness Acceptability Curve & Frontier Plot bevacizumab vs PDS")
+
+
+## Expected Loss Curves (ELCs) ----
+#* Function included in "R/Functions.R".The latest version can be found in `dampack` package
+elc_obj <- calc_exp_loss(wtp = v_wtp, psa = l_psa)
+elc_obj
+#* ELC plot
+plot.exp_loss(elc_obj, log_y = FALSE, 
+     txtsize = 16, xlim = c(0, NA), n_x_ticks = 14,
+     col = "full") +
+  ggthemes::scale_color_colorblind() +
+  ggthemes::scale_fill_colorblind() +
+  # geom_point(aes(shape = as.name("Strategy"))) +
+  scale_y_continuous("Expected Loss (Thousand NOK)", 
+                     breaks = number_ticks(10),
+                     labels = function(x) x/1000) +
+  theme(legend.position = c(0.4, 0.7))
+
+## Expected value of perfect information (EVPI) ----
+#* Function included in "R/Functions.R". The latest version can be found in `dampack` package
+evpi <- calc_evpi(wtp = v_wtp, psa = l_psa)
+#* EVPI plot
+plot.evpi(evpi, effect_units = "QALY")
+
+
+
+################################################### One way sensitivity analysis (OWSA)  ################################################### 
+strategy_names_A <- c("strA", "strC")
+strategy_names_B <- c("strB", "strC")
+#* Number of simulations
+n_sim <- 1000
+#* Generate PSA input dataset
+df_psa_input_owsa <- generate_psa_params_owsa(n_sim = n_sim)
+
+### Histogram of PSA dataset ----
+ggplot(melt(df_psa_input_owsa, variable.name = "Parameter"), 
+       aes(x = value)) +
+  facet_wrap(~Parameter, scales = "free") +
+  geom_histogram(aes(y = ..density..)) +
+  scale_x_continuous(breaks = number_ticks(4)) + 
+  ylab("") +
+  theme_bw(base_size = 4) + 
+  theme(axis.text = element_text(size = 6),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y  = element_blank(),
+        axis.ticks.y = element_blank())
+
+## Run PSA ----
+#* Initialize data.frames with PSA output 
+#* data.frame of costs
+df_c_owsa <- as.data.frame(matrix(0, 
+                             nrow = n_sim,
+                             ncol = n_str))
+colnames(df_c_owsa) <- v_names_str
+#* data.frame of effectiveness
+df_e_owsa <- as.data.frame(matrix(0, 
+                             nrow = n_sim,
+                             ncol = n_str))
+colnames(df_e_owsa) <- v_names_str
+
+
+#* Conduct probabilistic sensitivity analysis
+#* Run Markov model on each parameter set of PSA input dataset
+n_time_init_psa_series <- Sys.time()
+for (i in 1:n_sim) { # i <- 1
+  l_psa_input_owsa <- update_param_list(l_params_all, df_psa_input_owsa[i,])
+  # Economics Measures
+  l_out_ce_temp_owsa  <- calculate_ce_out(l_psa_input_owsa)
+  df_c_owsa[i, ]  <- l_out_ce_temp_owsa$Cost  
+  df_e_owsa[i, ]  <- l_out_ce_temp_owsa$Effect
+  # Display simulation progress
+  if (i/(n_sim/100) == round(i/(n_sim/100), 0)) { # display progress every 5%
+    cat('\r', paste(i/n_sim * 100, "% done", sep = " "))
+  }
+}
+n_time_end_psa_series <- Sys.time()
+n_time_total_psa_series <- n_time_end_psa_series - n_time_init_psa_series
+print(paste0("PSA with ", scales::comma(n_sim), " simulations run in series in ", 
+             round(n_time_total_psa_series, 2), " ", 
+             units(n_time_total_psa_series)))
+View(df_e_owsa)
+View(df_c_owsa)
+
+### STRATEGY A: Create a new PSA object for OWSA
+l_psa_owsa_strA <- make_psa_obj(cost          = df_c_owsa[, c(1, 3)], 
+                           effectiveness = df_e_owsa[, c(1, 3)], 
+                           parameters    = df_psa_input_owsa, 
+                           strategies    = strategy_names_A)
+l_psa_owsa_strA$strategies <- strategy_names_A
+colnames(l_psa_owsa_strA$effectiveness)<- strategy_names_A
+colnames(l_psa_owsa_strA$cost)<- strategy_names_A
+View(l_psa_owsa_strA)
+
+owsa_effect_strA <- owsa(
+  sa_obj = l_psa_owsa_strA,
+  params = NULL,
+  ranges = NULL,
+  nsamp = 100,
+  outcome = c("eff"),
+  wtp = NULL,
+  strategies = NULL,
+  poly.order = 2
+)
+owsa_effect_strA
+
+#### PLOTTING EFFECTS
+wtp <- 275000
+# Plot impact parameter values on effects
+plot(
+  owsa_effect_strA,
+  txtsize = 12,
+  col = c("full", "bw"),
+  facet_scales = c("free_x", "free_y", "free", "fixed"),
+  facet_nrow = NULL,
+  facet_ncol = NULL,
+  size = 1,
+  n_x_ticks = 6,
+  n_y_ticks = 6
+)
+
+# Plot tornado diagram for effects
+owsa_tornado(
+  owsa_effect_strA,
+  return = c("plot", "data"),
+  txtsize = 12,
+  min_rel_diff = 0,
+  col = c("full", "bw"),
+  n_y_ticks = 6,
+  ylim = NULL,
+  ybreaks = NULL
+)
+
+### PLOTTING COSTS
+# Perform sensitivity analysis for cost separately
+owsa_cost_strA <- owsa(
+  sa_obj = l_psa_owsa_strA,
+  params = NULL,
+  ranges = NULL,
+  nsamp = 100,
+  outcome = "cost",  # cost as the outcome
+  wtp = wtp,
+  strategies = NULL,
+  poly.order = 2
+)
+owsa_cost_strA
+
+# Plot tornado diagram for cost
+owsa_tornado(
+  owsa_cost_strA,
+  return = c("plot", "data"),
+  txtsize = 12,
+  min_rel_diff = 0,
+  col = c("full", "bw"),
+  n_y_ticks = 1,
+  ylim = NULL,
+  ybreaks = NULL
+)
+
+# Plot impact parameter values on cost
+plot(
+  owsa_cost_strA,
+  txtsize = 12,
+  col = c("full", "bw"),
+  facet_scales = c("free_x", "free_y", "free", "fixed"),
+  facet_nrow = NULL,
+  facet_ncol = NULL,
+  size = 1,
+  n_x_ticks = 6,
+  n_y_ticks = 6
+)
+
+
+### PLOTTING NMB
+# Perform sensitivity analysis for nmb separately
+owsa_nmb_strA <- owsa(
+  sa_obj = l_psa_owsa_strA,
+  params = NULL,
+  ranges = NULL,
+  nsamp = 100,
+  outcome = "nmb",  # nmb as the outcome
+  wtp = wtp,
+  strategies = NULL,
+  poly.order = 2
+)
+owsa_nmb_strA
+
+# Plot tornado diagram for nmb
+owsa_tornado_strA <- owsa_tornado(
+  owsa_nmb_strA,
+  return = c("plot", "data"),
+  txtsize = 12,
+  min_rel_diff = 0,
+  col = c("full", "bw"),
+  n_y_ticks = 3,
+  ylim = NULL,
+  ybreaks = NULL
+)
+
+owsa_tornado_strA <- owsa_tornado_strA + ylab("E[Net Montetary Benefit]") + xlab("Parameter Values") +
+  theme(axis.title.y = element_text(size = 10),  
+        axis.title.x = element_text(size = 10))  
+owsa_tornado_strA <- owsa_tornado_strA + ggtitle("Tornado diagram for most influential parameters on Net Monetary Benefit comparing aflibercept vs PDS") +
+  theme(plot.title = element_text(size = 10)) 
+print(owsa_tornado_strA)
+
+# Plot impact parameter values on nmb
+plot(
+  owsa_nmb_strA,
+  txtsize = 12,
+  col = c("full", "bw"),
+  facet_scales = c("free_x", "free_y", "free", "fixed"),
+  facet_nrow = NULL,
+  facet_ncol = NULL,
+  size = 1,
+  n_x_ticks = 6,
+  n_y_ticks = 6
+)
+
+
+### STRATEGY B: Create a new PSA object for OWSA
+l_psa_owsa_strB <- make_psa_obj(cost          = df_c_owsa[, c(2, 3)], 
+                                effectiveness = df_e_owsa[, c(2, 3)], 
+                                parameters    = df_psa_input_owsa, 
+                                strategies    = strategy_names_B)
+l_psa_owsa_strB$strategies <- strategy_names_B
+colnames(l_psa_owsa_strB$effectiveness)<- strategy_names_B
+colnames(l_psa_owsa_strB$cost)<- strategy_names_B
+View(l_psa_owsa_strB)
+
+owsa_effect_strB <- owsa(
+  sa_obj = l_psa_owsa_strB,
+  params = NULL,
+  ranges = NULL,
+  nsamp = 100,
+  outcome = c("eff"),
+  wtp = NULL,
+  strategies = NULL,
+  poly.order = 2
+)
+owsa_effect_strB
+
+#### PLOTTING EFFECTS
+wtp <- 275000
+# Plot impact parameter values on effects
+plot(
+  owsa_effect_strB,
+  txtsize = 12,
+  col = c("full", "bw"),
+  facet_scales = c("free_x", "free_y", "free", "fixed"),
+  facet_nrow = NULL,
+  facet_ncol = NULL,
+  size = 1,
+  n_x_ticks = 6,
+  n_y_ticks = 6
+)
+
+# Plot tornado diagram for effects
+owsa_tornado(
+  owsa_effect_strB,
+  return = c("plot", "data"),
+  txtsize = 12,
+  min_rel_diff = 0,
+  col = c("full", "bw"),
+  n_y_ticks = 6,
+  ylim = NULL,
+  ybreaks = NULL
+)
+
+### PLOTTING COSTS
+# Perform sensitivity analysis for cost separately
+owsa_cost_strB <- owsa(
+  sa_obj = l_psa_owsa_strB,
+  params = NULL,
+  ranges = NULL,
+  nsamp = 100,
+  outcome = "cost",  # cost as the outcome
+  wtp = wtp,
+  strategies = NULL,
+  poly.order = 2
+)
+owsa_cost_strB
+
+# Plot tornado diagram for cost
+owsa_tornado(
+  owsa_cost_strB,
+  return = c("plot", "data"),
+  txtsize = 12,
+  min_rel_diff = 0,
+  col = c("full", "bw"),
+  n_y_ticks = 1,
+  ylim = NULL,
+  ybreaks = NULL
+)
+
+# Plot impact parameter values on cost
+plot(
+  owsa_cost_strB,
+  txtsize = 12,
+  col = c("full", "bw"),
+  facet_scales = c("free_x", "free_y", "free", "fixed"),
+  facet_nrow = NULL,
+  facet_ncol = NULL,
+  size = 1,
+  n_x_ticks = 6,
+  n_y_ticks = 6
+)
+
+
+### PLOTTING NMB
+# Perform sensitivity analysis for nmb separately
+owsa_nmb_strB <- owsa(
+  sa_obj = l_psa_owsa_strB,
+  params = NULL,
+  ranges = NULL,
+  nsamp = 100,
+  outcome = "nmb",  # nmb as the outcome
+  wtp = wtp,
+  strategies = NULL,
+  poly.order = 2
+)
+owsa_nmb_strB
+
+# Plot tornado diagram for nmb
+owsa_tornado_strB <- owsa_tornado(
+                      owsa_nmb_strB,
+                      return = c("plot", "data"),
+                      txtsize = 12,
+                      min_rel_diff = 0,
+                      col = c("full", "bw"),
+                      n_y_ticks = 3,
+                      ylim = NULL,
+                      ybreaks = NULL
+                    )
+
+owsa_tornado_strB <- owsa_tornado_strB + ylab("E[Net Montetary Benefit]") + xlab("Parameter Values") +
+  theme(axis.title.y = element_text(size = 10),  
+        axis.title.x = element_text(size = 10))  
+
+# Add titles to the plots with modified text size
+owsa_tornado_strB <- owsa_tornado_strB + ggtitle("Tornado diagram for most influential parameters on Net Monetary Benefit comparing bevacizumab vs PDS") +
+  theme(plot.title = element_text(size = 10))  
+print(owsa_tornado_strB)
+
+
+
+# Plot impact parameter values on nmb
+plot(
+  owsa_nmb_strB,
+  txtsize = 12,
+  col = c("full", "bw"),
+  facet_scales = c("free_x", "free_y", "free", "fixed"),
+  facet_nrow = NULL,
+  facet_ncol = NULL,
+  size = 1,
+  n_x_ticks = 6,
+  n_y_ticks = 6
+)
+
